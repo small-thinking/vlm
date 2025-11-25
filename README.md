@@ -2,15 +2,22 @@
 
 Vision Language Model learning project.
 
-## Setup
+## Installation
+
+Run the automated setup script:
 
 ```bash
-conda activate vlm
-python src/vlm/scripts/verify_pytorch.py
+./setup.sh
 ```
+
+This will automatically:
+- Install `uv` package manager (if needed)
+- Install all dependencies (PyTorch 2.9, torchaudio, torchvision)
+- Verify your installation
 
 ## Stack
 
-- PyTorch 2.9 (MPS for M3 Mac, CUDA for A100/B100)
-- uv for package management
-- Python 3.11+
+- **Python**: 3.11+
+- **PyTorch**: 2.9 (with MPS support for M3 Mac, CUDA for A100/B100)
+- **Package Manager**: uv (recommended) or pip/conda
+- **Dependencies**: See [pyproject.toml](pyproject.toml)
