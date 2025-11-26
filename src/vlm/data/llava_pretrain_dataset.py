@@ -18,12 +18,14 @@ Usage:
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from transformers import CLIPImageProcessor
+
+from vlm.configs.data_config import DataConfig
 
 
 class LLaVAPretrainDataset(Dataset):
@@ -245,3 +247,37 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
             collated[key] = torch.stack([item[key] for item in batch])
     
     return collated
+
+
+def build_dataloader(
+    config: DataConfig,
+    tokenizer: Any,
+    image_processor: CLIPImageProcessor,
+) -> DataLoader:
+    """Build DataLoader for LLaVA pretraining.
+    
+    Args:
+        config: Data configuration
+        tokenizer: Tokenizer for language model
+        image_processor: Image processor for vision encoder
+        
+    Returns:
+        DataLoader instance
+    """
+    dataset = LLaVAPretrainDataset(
+        data_path=config.data_path,
+        image_folder=config.image_folder,
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+        max_length=config.max_length,
+    )
+    
+    return DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        shuffle=config.shuffle,
+        drop_last=config.drop_last,
+        collate_fn=collate_fn,
+        pin_memory=True,
+    )
