@@ -4,10 +4,19 @@ Replicating the LLaVA series of vision-language models.
 
 ![LLaVA Model Architecture](resources/llava-1.png)
 
-## Installation
+## Setup
 
 ```bash
-./setup.sh
+sh scripts/setup.sh
+```
+
+## Dataset
+
+To manually download and prepare the LLaVA-Pretrain dataset:
+
+```bash
+uv pip install huggingface-hub
+uv run python scripts/prepare_dataset.py
 ```
 
 ## Stack

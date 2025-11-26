@@ -27,7 +27,7 @@ jobs:
       run: uv sync
     
     - name: Verify PyTorch installation
-      run: uv run python src/vlm/scripts/verify_pytorch.py
+      run: uv run python scripts/verify_pytorch.py
     
     - name: Verify LLaVA model
-      run: uv run python src/vlm/scripts/verify_llava.py
+      run: uv run python scripts/verify_llava.py

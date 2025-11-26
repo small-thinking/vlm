@@ -29,7 +29,7 @@ uv sync
 
 # Verify installation
 echo "🔍 Verifying PyTorch installation..."
-if uv run python src/vlm/scripts/verify_pytorch.py; then
+if uv run python scripts/verify_pytorch.py; then
     echo ""
     echo "✅ Setup complete! Your environment is ready."
     echo ""
@@ -38,4 +38,26 @@ if uv run python src/vlm/scripts/verify_pytorch.py; then
 else
     echo "❌ Verification failed. Please check the error messages above."
     exit 1
+fi
+
+# Ask user if they want to download the dataset
+echo ""
+read -p "📦 Download LLaVA-Pretrain dataset? (y/n): " -n 1 -r
+echo ""
+
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "📦 Downloading and preparing LLaVA-Pretrain dataset..."
+    
+    # Install huggingface-hub if not already installed
+    uv pip install huggingface-hub
+    
+    # Run the preparation script
+    # We assume this script is run from the project root, so scripts/prepare_dataset.py is correct
+    uv run python scripts/prepare_dataset.py
+    
+else
+    echo "⏭️  Skipping dataset download."
+    echo "   You can download it later by running:"
+    echo "   uv pip install huggingface-hub"
+    echo "   uv run python scripts/prepare_dataset.py"
 fi
