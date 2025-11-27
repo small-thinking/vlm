@@ -209,3 +209,5 @@ __marimo__/
 # Datasets
 # Exclude downloaded datasets (large files)
 dataset/
+
+checkpoints/

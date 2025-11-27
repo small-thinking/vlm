@@ -145,7 +145,7 @@ class Phase1Trainer:
                 break
 
         print("Training completed.")
-        self.save_checkpoint("checkpoint_final.pt")
+        self.save_checkpoint("checkpoint_phase1.pt")
 
     def save_checkpoint(self, filename: str):
         """Save model checkpoint.
