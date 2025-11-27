@@ -52,6 +52,9 @@ class MLPConnector(nn.Module):
             layers.append(nn.Linear(hidden_dim, llm_dim))
             
             self.mlp = nn.Sequential(*layers)
+        
+        # Initialize weights with small values to prevent explosion
+        self._initialize_weights()
     
     def _get_activation(self, name: str) -> nn.Module:
         """Get activation function by name."""
@@ -63,6 +66,20 @@ class MLPConnector(nn.Module):
         if name not in activations:
             raise ValueError(f"Unknown activation: {name}. Choose from {list(activations.keys())}")
         return activations[name]
+    
+    def _initialize_weights(self):
+        """Initialize connector weights with small values.
+        
+        Uses Xavier uniform initialization with a small gain to prevent
+        large initial activations that can cause training instability.
+        """
+        for module in self.mlp.modules():
+            if isinstance(module, nn.Linear):
+                # Use smaller initialization for stability
+                # Standard Xavier init uses gain=1.0, we use 0.1 for smaller weights
+                nn.init.xavier_uniform_(module.weight, gain=0.1)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
     
     def forward(self, visual_features: torch.Tensor) -> torch.Tensor:
         """Project visual features to LLM embedding space."""
