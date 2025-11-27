@@ -13,9 +13,10 @@ def generate_response(
     max_new_tokens: int = 512,
     temperature: float = 0.7,
     device: Optional[torch.device] = None,
+    use_greedy: bool = False,
 ) -> str:
     """Generate response from LLaVA model.
-    
+
     Args:
         model: LLaVA model instance
         image_path: Path to image file (optional)
@@ -23,7 +24,9 @@ def generate_response(
         max_new_tokens: Maximum number of tokens to generate
         temperature: Sampling temperature
         device: Device to run inference on
-        
+        use_greedy: If True, use greedy decoding (deterministic).
+            If False, use sampling.
+
     Returns:
         Generated text response
     """
@@ -36,12 +39,13 @@ def generate_response(
     # Process image if provided
     pixel_values = None
     if image_path:
-        image = Image.open(image_path).convert('RGB')
-        processed = model.vision_encoder.processor(
-            images=image,
-            return_tensors='pt'
-        )
-        pixel_values = processed['pixel_values'].to(device)
+        with Image.open(image_path) as image:
+            image_rgb = image.convert('RGB')
+            processed = model.vision_encoder.processor(
+                images=image_rgb,
+                return_tensors='pt'
+            )
+            pixel_values = processed['pixel_values'].to(device)
     
     # Tokenize text
     text_input = f"Human: {text}\nAssistant:" if text else "Assistant:"
@@ -72,6 +76,8 @@ def generate_response(
         
         # Autoregressive generation
         generated_ids = input_ids.clone()
+        embed_layer = model.language_model.get_input_embeddings()
+        
         for _ in range(max_new_tokens):
             outputs = model.language_model.model(
                 input_ids=None,
@@ -79,16 +85,22 @@ def generate_response(
                 inputs_embeds=inputs_embeds,
             )
             
-            # Sample next token
-            logits = outputs.logits[:, -1, :] / temperature
-            probs = torch.softmax(logits, dim=-1)
-            next_token_id = torch.multinomial(probs, num_samples=1)
+            # Sample or greedily decode next token
+            logits = outputs.logits[:, -1, :]
+            
+            if use_greedy:
+                # Greedy decoding: always pick most likely token
+                next_token_id = torch.argmax(logits, dim=-1, keepdim=True)
+            else:
+                # Sampling: use temperature and multinomial (stochastic)
+                scaled_logits = logits / temperature
+                probs = torch.softmax(scaled_logits, dim=-1)
+                next_token_id = torch.multinomial(probs, num_samples=1)
             
             if next_token_id.item() == tokenizer.eos_token_id:
                 break
             
             # Update for next iteration
-            embed_layer = model.language_model.get_input_embeddings()
             next_embed = embed_layer(next_token_id)
             inputs_embeds = torch.cat([inputs_embeds, next_embed], dim=1)
             attention_mask = torch.cat([
@@ -98,10 +110,10 @@ def generate_response(
             generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
         
         # Decode only generated tokens
+        start_idx = input_ids.shape[1]
         response = tokenizer.decode(
-            generated_ids[0, input_ids.shape[1]:],
+            generated_ids[0, start_idx:],
             skip_special_tokens=True
         )
     
     return response.strip()
-

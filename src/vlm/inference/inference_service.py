@@ -12,8 +12,14 @@ Example commands:
     # Run on specific device
     uv run python -m vlm.inference.inference_service --device cuda --port 8080
 
-    # Test inference API
-    curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{ "text": "What is in this image?"}'
+    # Test inference API (with image - relative path to repo root)
+    curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{"text": "What is in this image?", "image_path": "dataset/llava-pretrain/00000/000000012.jpg"}'
+    
+    # Test inference API (with image - absolute path)
+    curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{"text": "What is in this image?", "image_path": "/absolute/path/to/image.jpg"}'
+    
+    # Test inference API (text only)
+    curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{"text": "Hello, how are you?"}'
 
     # Health check
     curl http://localhost:8000/health
@@ -33,9 +39,17 @@ from ..models.llava import LLaVAModel
 
 
 class InferenceRequest(BaseModel):
-    """Request model for inference API."""
+    """Request model for inference API.
+
+    image_path can be:
+    - Absolute path: /absolute/path/to/image.jpg
+    - Relative path: dataset/llava-pretrain/00000/image.jpg (relative to repo root)
+    """
     image_path: Optional[str] = None
     text: str = ""
+    temperature: Optional[float] = None
+    seed: Optional[int] = None
+    use_greedy: Optional[bool] = None
 
 
 class InferenceResponse(BaseModel):
@@ -59,6 +73,8 @@ def create_app(
         FastAPI app instance
     """
     model: Optional[LLaVAModel] = None
+    # Resolve project root for relative path resolution
+    project_root = Path(__file__).parent.parent.parent.parent
     
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -85,20 +101,40 @@ def create_app(
         if model is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
         
-        # Validate image path if provided
-        if request.image_path and not Path(request.image_path).exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Image not found: {request.image_path}"
-            )
+        # Resolve image path: accepts absolute paths or relative paths to repo root
+        image_path = None
+        if request.image_path:
+            path_input = Path(request.image_path)
+            if path_input.is_absolute():
+                # Use absolute path as-is
+                image_path = path_input
+            else:
+                # Resolve relative path from project root
+                image_path = project_root / request.image_path
+            
+            if not image_path.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Image not found: {image_path}"
+                )
+            image_path = str(image_path)
         
         try:
-            response = generate_response(
-                model=model,
-                image_path=request.image_path,
-                text=request.text,
-                device=device,
-            )
+            # Use request parameters or defaults
+            kwargs = {
+                "model": model,
+                "image_path": image_path,
+                "text": request.text,
+                "device": device,
+            }
+            if request.temperature is not None:
+                kwargs["temperature"] = request.temperature
+            if request.seed is not None:
+                kwargs["seed"] = request.seed
+            if request.use_greedy is not None:
+                kwargs["use_greedy"] = request.use_greedy
+
+            response = generate_response(**kwargs)
             return InferenceResponse(response=response)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -115,7 +151,7 @@ def main():
     """Run the API server."""
     # Default checkpoint path (relative to project root)
     project_root = Path(__file__).parent.parent.parent.parent
-    default_checkpoint = project_root / "checkpoints" / "checkpoint_final.pt"
+    default_checkpoint = project_root / "checkpoints" / "checkpoint_phase1.pt"
     
     parser = argparse.ArgumentParser(description="LLaVA Inference API")
     parser.add_argument(
