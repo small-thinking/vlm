@@ -2,7 +2,7 @@
 """Training script for LLaVA Phase 1 (Pretraining).
 
 Dry run: 
-uv run src/vlm/train/run.py --data_path dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder dataset/llava-pretrain --max_steps 10 --batch_size 8
+uv run src/vlm/train/run.py --data_path ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder ~/dataset/llava-pretrain --max_steps 10 --batch_size 8
 """
 
 import argparse
@@ -93,8 +93,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LLaVA Phase 1 Training Sketch")
     
     # Data args
-    parser.add_argument("--data_path", type=str, default="dataset/chat.json", help="Path to dataset JSON")
-    parser.add_argument("--image_folder", type=str, default="dataset/images", help="Path to image folder")
+    parser.add_argument("--data_path", type=str, default="~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json", help="Path to dataset JSON")
+    parser.add_argument("--image_folder", type=str, default="~/dataset/llava-pretrain", help="Path to image folder")
     
     # Training args
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
@@ -102,7 +102,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_length", type=int, default=512, help="Max sequence length")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--max_steps", type=int, default=10, help="Number of training steps for sketch")
-    parser.add_argument("--output_dir", type=str, default="checkpoints", help="Output directory")
+    parser.add_argument("--output_dir", type=str, default="~/checkpoints/llava", help="Output directory")
     
     args = parser.parse_args()
     train(args)

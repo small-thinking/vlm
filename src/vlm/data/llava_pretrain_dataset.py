@@ -51,8 +51,11 @@ class LLaVAPretrainDataset(Dataset):
         max_length: int = 768,
         num_visual_tokens: int = 257,  # CLIP ViT-L/14: 256 patches + 1 CLS
     ):
-        self.data_path = data_path
-        self.image_folder = Path(image_folder) if image_folder else None
+        # Expand ~ to home directory for both paths
+        self.data_path = str(Path(data_path).expanduser())
+        self.image_folder = (
+            Path(image_folder).expanduser() if image_folder else None
+        )
         self.image_processor = image_processor
         self.tokenizer = tokenizer
         self.max_length = max_length

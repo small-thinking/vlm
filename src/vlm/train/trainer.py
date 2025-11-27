@@ -2,6 +2,7 @@
 
 import os
 import math
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -154,7 +155,9 @@ class Phase1Trainer:
             filename: Name of the checkpoint file
         """
         if self.output_dir:
-            os.makedirs(self.output_dir, exist_ok=True)
-            checkpoint_path = os.path.join(self.output_dir, filename)
-            torch.save(self.model.state_dict(), checkpoint_path)
+            # Expand ~ to home directory if present
+            output_dir = Path(self.output_dir).expanduser()
+            os.makedirs(output_dir, exist_ok=True)
+            checkpoint_path = output_dir / filename
+            torch.save(self.model.state_dict(), str(checkpoint_path))
             print(f"Saved checkpoint to {checkpoint_path}")

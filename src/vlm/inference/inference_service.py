@@ -6,14 +6,13 @@ Example commands:
     uv run python -m vlm.inference.inference_service
 
     # Run with custom checkpoint
-    uv run python -m vlm.inference.inference_service \\
-        --checkpoint checkpoints/custom.pt
+    uv run python -m vlm.inference.inference_service --checkpoint ~/models/llava/checkpoint_phase1.pt
 
     # Run on specific device
     uv run python -m vlm.inference.inference_service --device cuda --port 8080
 
-    # Test inference API (with image - relative path to repo root)
-    curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{"text": "What is in this image?", "image_path": "dataset/llava-pretrain/00000/000000012.jpg"}'
+    # Test inference API (with image - path in ~/dataset)
+    curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{"text": "What is in this image?", "image_path": "~/dataset/llava-pretrain/00000/000000012.jpg"}'
     
     # Test inference API (with image - absolute path)
     curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{"text": "What is in this image?", "image_path": "/absolute/path/to/image.jpg"}'
@@ -26,6 +25,7 @@ Example commands:
 """
 import argparse
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional
 from pathlib import Path
 import torch
@@ -43,7 +43,7 @@ class InferenceRequest(BaseModel):
 
     image_path can be:
     - Absolute path: /absolute/path/to/image.jpg
-    - Relative path: dataset/llava-pretrain/00000/image.jpg (relative to repo root)
+    - Path with ~ expansion: ~/dataset/llava-pretrain/00000/image.jpg
     """
     image_path: Optional[str] = None
     text: str = ""
@@ -80,9 +80,11 @@ def create_app(
     async def lifespan(app: FastAPI):
         """Lifespan context manager for model loading."""
         nonlocal model
-        if not Path(checkpoint_path).exists():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-        model = load_model_from_checkpoint(checkpoint_path, device=device)
+        # Expand ~ if present in checkpoint path
+        expanded_path = Path(checkpoint_path).expanduser()
+        if not expanded_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {expanded_path}")
+        model = load_model_from_checkpoint(str(expanded_path), device=device)
         yield
         # Cleanup if needed
     
@@ -98,15 +100,21 @@ def create_app(
         Returns:
             Generated response
         """
+        # Log request received with timestamp
+        request_time = datetime.now()
+        print(f"[{request_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] Received inference request")
+        print(f"  - Text: {request.text[:100]}{'...' if len(request.text) > 100 else ''}")
+        print(f"  - Image path: {request.image_path or 'None'}")
+        
         if model is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
         
-        # Resolve image path: accepts absolute paths or relative paths to repo root
+        # Resolve image path: accepts absolute paths, paths with ~ expansion, or relative paths to repo root
         image_path = None
         if request.image_path:
-            path_input = Path(request.image_path)
+            path_input = Path(request.image_path).expanduser()  # Expand ~ to home directory
             if path_input.is_absolute():
-                # Use absolute path as-is
+                # Use absolute path as-is (including expanded ~ paths)
                 image_path = path_input
             else:
                 # Resolve relative path from project root
@@ -134,9 +142,21 @@ def create_app(
             if request.use_greedy is not None:
                 kwargs["use_greedy"] = request.use_greedy
 
+            # Generate response and log timing
+            inference_start = datetime.now()
+            print(f"[{inference_start.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] Starting inference...")
+            
             response = generate_response(**kwargs)
+            
+            inference_end = datetime.now()
+            elapsed = (inference_end - inference_start).total_seconds()
+            print(f"[{inference_end.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] Inference completed in {elapsed:.2f}s")
+            print(f"  - Response length: {len(response)} characters")
+            
             return InferenceResponse(response=response)
         except Exception as e:
+            error_time = datetime.now()
+            print(f"[{error_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] Error during inference: {e}")
             raise HTTPException(status_code=500, detail=str(e))
     
     @app.get("/health")
@@ -149,9 +169,8 @@ def create_app(
 
 def main():
     """Run the API server."""
-    # Default checkpoint path (relative to project root)
-    project_root = Path(__file__).parent.parent.parent.parent
-    default_checkpoint = project_root / "checkpoints" / "checkpoint_phase1.pt"
+    # Default checkpoint path in ~/models/llava
+    default_checkpoint = Path.home() / "models" / "llava" / "checkpoint_phase1.pt"
     
     parser = argparse.ArgumentParser(description="LLaVA Inference API")
     parser.add_argument(
@@ -182,8 +201,8 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate checkpoint exists
-    checkpoint_path = Path(args.checkpoint)
+    # Validate checkpoint exists (expand ~ if present)
+    checkpoint_path = Path(args.checkpoint).expanduser()
     if not checkpoint_path.exists():
         print(f"Error: Checkpoint not found: {checkpoint_path}")
         print("Please provide a valid checkpoint path with --checkpoint")
