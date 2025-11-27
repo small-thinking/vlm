@@ -114,9 +114,8 @@ def main():
     args = parser.parse_args()
 
     repo_id = "liuhaotian/LLaVA-Pretrain"
-    # Determine project root relative to this script
-    project_root = Path(__file__).resolve().parent.parent
-    dataset_dir = project_root / "dataset" / "llava-pretrain"
+    # Use ~/dataset/llava-pretrain as the dataset location
+    dataset_dir = Path.home() / "dataset" / "llava-pretrain"
     zip_file = dataset_dir / "images.zip"
 
     if not args.skip_download:

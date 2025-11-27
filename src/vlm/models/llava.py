@@ -79,7 +79,16 @@ class LLaVAModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
     ):
-        """Forward pass through LLaVA model."""
+        """Forward pass through LLaVA model.
+
+        Key Architecture Point:
+        - Images are NOT tokenized. They are converted to embeddings via:
+          Images → CLIP encoder → Connector → Visual embeddings
+        - Visual embeddings are in the same space as text embeddings
+          (LLM hidden_size)
+        - Both are concatenated and passed as inputs_embeds (not input_ids)
+        - The LLM processes them as regular sequence tokens in embedding space
+        """
         # Convert text token IDs to embeddings
         text_embeds = None
         if input_ids is not None:
@@ -109,7 +118,8 @@ class LLaVAModel(nn.Module):
                 )
                 labels = torch.cat([visual_labels, labels], dim=1)
         
-        # Concatenate visual and text embeddings
+        # Concatenate visual and text embeddings in the same embedding space
+        # Shape: (batch, num_visual_tokens + num_text_tokens, hidden_size)
         if visual_embeds is not None and text_embeds is not None:
             inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
         elif visual_embeds is not None:

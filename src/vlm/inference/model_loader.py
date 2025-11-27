@@ -16,7 +16,7 @@ def load_model_from_checkpoint(
     """Load LLaVA model from checkpoint.
     
     Args:
-        checkpoint_path: Path to model checkpoint
+        checkpoint_path: Path to model checkpoint (supports ~ expansion)
         config: Model configuration. If None, uses default config.
         device: Device to load model on. If None, auto-detects.
         
@@ -34,7 +34,9 @@ def load_model_from_checkpoint(
     config = config or LLaVAConfig()
     model = LLaVAModel(config)
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Expand ~ to home directory if present
+    expanded_path = Path(checkpoint_path).expanduser()
+    checkpoint = torch.load(str(expanded_path), map_location=device)
     model.load_state_dict(checkpoint)
     model.eval()
     model.to(device)
