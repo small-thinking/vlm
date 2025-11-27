@@ -2,7 +2,7 @@
 
 Replicating the LLaVA series of vision-language models.
 
-![LLaVA Model Architecture](resources/llava-1.png)
+![LLaVA Model Architecture](resources/llava-qwen.png)
 
 ## Setup
 
