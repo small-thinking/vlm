@@ -2,7 +2,9 @@
 
 import os
 import math
+import time
 from pathlib import Path
+from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -24,6 +26,11 @@ class Phase1Trainer:
         max_steps: int,
         log_interval: int = 10,
         max_grad_norm: float = 1.0,
+        use_wandb: bool = False,
+        wandb_project: Optional[str] = None,
+        wandb_run_name: Optional[str] = None,
+        scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
+        hyperparams: Optional[dict] = None,
     ):
         """Initialize Phase 1 Trainer.
 
@@ -36,6 +43,12 @@ class Phase1Trainer:
             max_steps: Maximum number of training steps
             log_interval: Interval for logging loss
             max_grad_norm: Maximum gradient norm for clipping
+            use_wandb: Whether to use Weights & Biases for logging
+            wandb_project: W&B project name (required if use_wandb=True)
+            wandb_run_name: W&B run name (optional, auto-generated if None)
+            scheduler: Learning rate scheduler (optional)
+            hyperparams: Dictionary of hyperparameters to log
+                (e.g., learning_rate, batch_size)
         """
         self.model = model
 
@@ -45,11 +58,52 @@ class Phase1Trainer:
 
         self.train_dataloader = train_dataloader
         self.optimizer = optimizer
+        self.scheduler = scheduler
         self.device = device
         self.output_dir = output_dir
         self.max_steps = max_steps
         self.log_interval = log_interval
         self.max_grad_norm = max_grad_norm
+        self.use_wandb = use_wandb
+        
+        # Initialize wandb if enabled
+        self.wandb = None
+        if self.use_wandb:
+            try:
+                import wandb
+                self.wandb = wandb
+                
+                # Build config with hyperparameters
+                wandb_config = {
+                    "max_steps": max_steps,
+                    "log_interval": log_interval,
+                    "max_grad_norm": max_grad_norm,
+                    "device": str(device),
+                    "output_dir": output_dir,
+                }
+                
+                # Add hyperparameters if provided
+                if hyperparams:
+                    wandb_config.update(hyperparams)
+                
+                # Extract learning rate from optimizer if not in hyperparams
+                if hyperparams is None or "learning_rate" not in hyperparams:
+                    optimizer_lr = optimizer.param_groups[0].get("lr")
+                    if optimizer_lr is not None:
+                        wandb_config["learning_rate"] = optimizer_lr
+                
+                wandb.init(
+                    project=wandb_project or "llava-pretrain",
+                    name=wandb_run_name,
+                    config=wandb_config
+                )
+                print("Weights & Biases logging enabled.")
+            except ImportError:
+                print(
+                    "Warning: wandb not installed. "
+                    "Install with: pip install wandb"
+                )
+                self.use_wandb = False
 
     def train(self):
         """Run training loop."""
@@ -59,6 +113,10 @@ class Phase1Trainer:
 
         step = 0
         total_loss = 0
+        
+        # Track timing for throughput metrics
+        start_time = time.time()
+        last_log_time = start_time
 
         progress_bar = tqdm(range(self.max_steps), desc="Training")
 
@@ -119,21 +177,101 @@ class Phase1Trainer:
 
             # Optimizer step
             self.optimizer.step()
+            
+            # Learning rate scheduler step
+            if self.scheduler is not None:
+                self.scheduler.step()
 
             # Update stats
             loss_value = loss.item()
             total_loss += loss_value
             avg_loss = total_loss / step
+            
+            # Compute additional metrics
+            # Perplexity: exp(loss), capped to avoid overflow
+            perplexity = math.exp(min(loss_value, 10.0))
+            
+            # Get current learning rate
+            current_lr = self.optimizer.param_groups[0]["lr"]
+            
+            # Compute parameter norm (L2 norm of all trainable parameters)
+            param_norm = 0.0
+            for param in self.model.parameters():
+                if param.requires_grad:
+                    param_norm += param.data.norm(2).item() ** 2
+            param_norm = math.sqrt(param_norm)
+            
+            # Compute throughput metrics
+            current_time = time.time()
+            elapsed_time = current_time - last_log_time
+            steps_per_sec = (
+                1.0 / elapsed_time if elapsed_time > 0 else 0.0
+            )
+            
+            # Estimate tokens per second
+            batch_size = input_ids.size(0) if input_ids is not None else 1
+            seq_len = input_ids.size(1) if input_ids is not None else 0
+            tokens_per_sec = (
+                (batch_size * seq_len) / elapsed_time
+                if elapsed_time > 0 else 0.0
+            )
+            
+            # Track if batch has images (multimodal vs text-only)
+            has_images = 1 if pixel_values is not None else 0
+            
+            # Get GPU memory usage if available
+            gpu_memory_mb = None
+            if self.device.type == "cuda":
+                gpu_memory_mb = (
+                    torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+                )
+            elif self.device.type == "mps":
+                # MPS doesn't have direct memory query, skip for now
+                pass
 
             print(
                 f"Step {step}: Loss: {loss_value:.4f}, "
-                f"Average Loss: {avg_loss:.4f}, Gradient Norm: {grad_norm:.4f}"
+                f"Avg Loss: {avg_loss:.4f}, "
+                f"PPL: {perplexity:.2f}, "
+                f"Grad Norm: {grad_norm:.4f}, "
+                f"LR: {current_lr:.2e}"
             )
             progress_bar.set_postfix({
                 "loss": f"{loss_value:.4f}",
                 "avg_loss": f"{avg_loss:.4f}",
-                "grad_norm": f"{grad_norm:.4f}"
+                "ppl": f"{perplexity:.2f}",
+                "grad_norm": f"{grad_norm:.4f}",
+                "lr": f"{current_lr:.2e}"
             })
+            
+            # Log to wandb if enabled
+            if self.use_wandb and self.wandb is not None:
+                grad_norm_val = (
+                    grad_norm.item()
+                    if isinstance(grad_norm, torch.Tensor)
+                    else grad_norm
+                )
+                
+                log_dict = {
+                    "train/loss": loss_value,
+                    "train/avg_loss": avg_loss,
+                    "train/perplexity": perplexity,
+                    "train/grad_norm": grad_norm_val,
+                    "train/param_norm": param_norm,
+                    "train/learning_rate": current_lr,
+                    "train/steps_per_sec": steps_per_sec,
+                    "train/tokens_per_sec": tokens_per_sec,
+                    "train/has_images": has_images,
+                    "train/step": step,
+                }
+                
+                # Add GPU memory if available
+                if gpu_memory_mb is not None:
+                    log_dict["train/gpu_memory_mb"] = gpu_memory_mb
+                
+                self.wandb.log(log_dict, step=step)
+            
+            last_log_time = current_time
 
             # Periodic checkpoint saving every 20 steps
             if step % 20 == 0:
@@ -151,6 +289,10 @@ class Phase1Trainer:
 
         print("Training completed.")
         self.save_checkpoint("checkpoint_phase1.pt")
+        
+        # Finish wandb run if enabled
+        if self.use_wandb and self.wandb is not None:
+            self.wandb.finish()
 
     def save_checkpoint(self, filename: str):
         """Save model checkpoint.

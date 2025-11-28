@@ -8,6 +8,7 @@ uv run src/vlm/train/run.py --data_path /workspace/dataset/llava-pretrain/blip_l
 import argparse
 import torch
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from vlm.configs.data_config import DataConfig
 from vlm.configs.model_config import LLaVAConfig
@@ -75,6 +76,21 @@ def train(args):
         lr=args.learning_rate
     )
     
+    # Setup Learning Rate Scheduler (Cosine Annealing)
+    scheduler = None
+    if args.use_cosine_schedule:
+        min_lr = args.min_lr if args.min_lr is not None else 0.0
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=args.max_steps,
+            eta_min=min_lr
+        )
+        print(
+            f"Using cosine learning rate schedule: "
+            f"T_max={args.max_steps}, "
+            f"eta_min={scheduler.eta_min}"
+        )
+    
     # 6. Initialize Trainer
     trainer = Phase1Trainer(
         model=model,
@@ -82,7 +98,19 @@ def train(args):
         optimizer=optimizer,
         device=device,
         output_dir=args.output_dir,
-        max_steps=args.max_steps
+        max_steps=args.max_steps,
+        use_wandb=args.use_wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
+        scheduler=scheduler,
+        hyperparams={
+            "learning_rate": args.learning_rate,
+            "batch_size": args.batch_size,
+            "max_length": args.max_length,
+            "num_workers": args.num_workers,
+            "use_cosine_schedule": args.use_cosine_schedule,
+            "min_lr": args.min_lr if args.min_lr is not None else 0.0,
+        }
     )
     
     # 7. Start Training
@@ -103,6 +131,24 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--max_steps", type=int, default=10, help="Number of training steps for sketch")
     parser.add_argument("--output_dir", type=str, default="~/checkpoints/llava", help="Output directory")
+    
+    # Learning rate schedule args
+    parser.add_argument(
+        "--use_cosine_schedule",
+        action="store_true",
+        help="Use cosine annealing LR schedule"
+    )
+    parser.add_argument(
+        "--min_lr",
+        type=float,
+        default=1e-6,
+        help="Minimum learning rate for cosine schedule (default: 0.0)"
+    )
+    
+    # Wandb args
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="llava-pretrain", help="W&B project name")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (default: auto-generated)")
     
     args = parser.parse_args()
     train(args)
