@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -64,16 +65,39 @@ class Phase1Trainer:
         self.use_wandb = use_wandb
         self.save_checkpoint_interval = save_checkpoint_interval
 
+        # Auto-detect DDP: check if model is wrapped with DDP
+        # DDP-wrapped models have a 'module' attribute and class name
+        self.ddp_enabled = (
+            hasattr(model, 'module') and
+            type(model).__name__ == 'DistributedDataParallel'
+        )
+
+        # Auto-detect rank and world_size from environment or dist
+        if dist.is_initialized():
+            self.rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+        else:
+            # Fall back to environment variables or defaults
+            self.rank = int(os.environ.get('RANK', 0))
+            self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+
+        # Get underlying model if wrapped with DDP
+        if self.ddp_enabled:
+            self.underlying_model = model.module
+        else:
+            self.underlying_model = model
+
         # Phase 1: Freeze VLM/LLM, Train Connector
-        if not self.use_wandb:
+        # Set training stage on underlying model
+        if self.rank == 0 and not self.use_wandb:
             print(
                 "Phase1Trainer: Setting training stage to 1 (Pretraining)..."
             )
-        self.model.set_training_stage(1)
-        
-        # Initialize wandb if enabled
+        self.underlying_model.set_training_stage(1)
+
+        # Initialize wandb if enabled (only on rank 0)
         self.wandb = None
-        if self.use_wandb:
+        if self.use_wandb and self.rank == 0:
             try:
                 import wandb
                 self.wandb = wandb
@@ -86,11 +110,11 @@ class Phase1Trainer:
                     "device": str(device),
                     "output_dir": output_dir,
                 }
-                
+
                 # Add hyperparameters if provided
                 if hyperparams:
                     wandb_config.update(hyperparams)
-                
+
                 # Extract learning rate from optimizer if not in hyperparams
                 if hyperparams is None or "learning_rate" not in hyperparams:
                     optimizer_lr = optimizer.param_groups[0].get("lr")
@@ -112,14 +136,21 @@ class Phase1Trainer:
 
     def train(self):
         """Run training loop."""
-        print("Starting training...")
+        if self.rank == 0:
+            print("Starting training...")
         self.model.train()
-        self.model.to(self.device)
+        # Model should already be on device if DDP is enabled
+        if not self.ddp_enabled:
+            self.model.to(self.device)
 
         step = 0
         total_loss = 0
 
-        progress_bar = tqdm(range(self.max_steps), desc="Training")
+        # Only show progress bar on rank 0
+        if self.rank == 0:
+            progress_bar = tqdm(range(self.max_steps), desc="Training")
+        else:
+            progress_bar = range(self.max_steps)
 
         # Infinite iterator over dataloader
         data_iter = iter(self.train_dataloader)
@@ -164,7 +195,8 @@ class Phase1Trainer:
             if not torch.isfinite(loss):
                 msg = (f"Warning: Non-finite loss at step {step}: "
                        f"{loss.item()}")
-                print(msg)
+                if self.rank == 0:
+                    print(msg)
                 continue
 
             # Backward pass
@@ -212,25 +244,28 @@ class Phase1Trainer:
                 # MPS doesn't have direct memory query, skip for now
                 pass
 
-            # Only print logs if wandb is not enabled
-            if not self.use_wandb:
-                print(
-                    f"Step {step}: Loss: {loss_value:.4f}, "
-                    f"Avg Loss: {avg_loss:.4f}, "
-                    f"PPL: {perplexity:.2f}, "
-                    f"Grad Norm: {grad_norm:.4f}, "
-                    f"LR: {current_lr:.2e}"
-                )
-            progress_bar.set_postfix({
-                "loss": f"{loss_value:.4f}",
-                "avg_loss": f"{avg_loss:.4f}",
-                "ppl": f"{perplexity:.2f}",
-                "grad_norm": f"{grad_norm:.4f}",
-                "lr": f"{current_lr:.2e}"
-            })
-            
-            # Log to wandb if enabled
-            if self.use_wandb and self.wandb is not None:
+            # Only print logs on rank 0
+            if self.rank == 0:
+                if not self.use_wandb:
+                    print(
+                        f"Step {step}: Loss: {loss_value:.4f}, "
+                        f"Avg Loss: {avg_loss:.4f}, "
+                        f"PPL: {perplexity:.2f}, "
+                        f"Grad Norm: {grad_norm:.4f}, "
+                        f"LR: {current_lr:.2e}"
+                    )
+                if hasattr(progress_bar, 'set_postfix'):
+                    progress_bar.set_postfix({
+                        "loss": f"{loss_value:.4f}",
+                        "avg_loss": f"{avg_loss:.4f}",
+                        "ppl": f"{perplexity:.2f}",
+                        "grad_norm": f"{grad_norm:.4f}",
+                        "lr": f"{current_lr:.2e}",
+                    })
+
+            # Log to wandb if enabled (only on rank 0)
+            if (self.use_wandb and self.wandb is not None and
+                    self.rank == 0):
                 grad_norm_val = (
                     grad_norm.item()
                     if isinstance(grad_norm, torch.Tensor)
@@ -251,22 +286,29 @@ class Phase1Trainer:
                     log_dict["train/gpu_memory_mb"] = gpu_memory_mb
                 
                 self.wandb.log(log_dict, step=step)
-            
-            if step % self.save_checkpoint_interval == 0:
+
+            # Save checkpoint only on rank 0
+            if step % self.save_checkpoint_interval == 0 and self.rank == 0:
                 self.save_checkpoint("checkpoint_phase1.pt")
 
             # Early stopping if loss explodes
             if (loss_value > 100.0 or math.isnan(loss_value) or
                     math.isinf(loss_value)):
-                print(f"\nError: Loss exploded at step {step}: {loss_value}")
-                print("Stopping training to prevent further issues.")
+                if self.rank == 0:
+                    print(
+                        f"\nError: Loss exploded at step {step}: "
+                        f"{loss_value}"
+                    )
+                    print("Stopping training to prevent further issues.")
                 break
-            
-        self.save_checkpoint("checkpoint_phase1.pt")
-        print("Training completed.")
-        
-        # Finish wandb run if enabled
-        if self.use_wandb and self.wandb is not None:
+
+        # Final checkpoint save only on rank 0
+        if self.rank == 0:
+            self.save_checkpoint("checkpoint_phase1.pt")
+            print("Training completed.")
+
+        # Finish wandb run if enabled (only on rank 0)
+        if self.use_wandb and self.wandb is not None and self.rank == 0:
             self.wandb.finish()
 
     def save_checkpoint(self, filename: str):
@@ -275,10 +317,14 @@ class Phase1Trainer:
         Args:
             filename: Name of the checkpoint file
         """
-        if self.output_dir:
+        if self.output_dir and self.rank == 0:
             # Expand ~ to home directory if present
             output_dir = Path(self.output_dir).expanduser()
             os.makedirs(output_dir, exist_ok=True)
             checkpoint_path = output_dir / filename
-            torch.save(self.model.state_dict(), str(checkpoint_path))
+            # Save underlying model state (unwrap DDP if needed)
+            torch.save(
+                self.underlying_model.state_dict(),
+                str(checkpoint_path)
+            )
             print(f"Saved checkpoint to {checkpoint_path}")
