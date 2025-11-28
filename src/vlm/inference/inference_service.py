@@ -3,13 +3,13 @@
 
 Example commands:
     # Run with default checkpoint
-    uv run python -m vlm.inference.inference_service
+    python -m vlm.inference.inference_service
 
     # Run with custom checkpoint
-    uv run python -m vlm.inference.inference_service --checkpoint ~/models/llava/checkpoint_phase1.pt
+    python -m vlm.inference.inference_service --checkpoint ~/models/llava/checkpoint_phase1.pt
 
     # Run on specific device
-    uv run python -m vlm.inference.inference_service --device cuda --port 8080
+    python -m vlm.inference.inference_service --device cuda --port 8080
 
     # Test inference API (with image - path in ~/dataset)
     curl -X POST "http://localhost:8000/infer" -H "Content-Type: application/json" -d '{"text": "What is in this image?", "image_path": "~/dataset/llava-pretrain/00000/000000012.jpg"}'
