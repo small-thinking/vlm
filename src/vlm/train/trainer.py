@@ -32,6 +32,7 @@ class Phase1Trainer:
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
         save_checkpoint_interval: int = 100,
+        use_fp16: bool = False,
     ):
         """Initialize Phase 1 Trainer.
 
@@ -52,6 +53,8 @@ class Phase1Trainer:
                 (e.g., learning_rate, batch_size)
             save_checkpoint_interval: Interval for saving checkpoints
                 (default: 20 steps)
+            use_fp16: Whether to use fp16/mixed precision training
+                (only enabled if CUDA is available)
         """
         self.model = model
         self.train_dataloader = train_dataloader
@@ -64,6 +67,16 @@ class Phase1Trainer:
         self.max_grad_norm = max_grad_norm
         self.use_wandb = use_wandb
         self.save_checkpoint_interval = save_checkpoint_interval
+
+        # Setup fp16/mixed precision training
+        self.use_fp16 = use_fp16 and torch.cuda.is_available()
+        self.scaler = None
+        if self.use_fp16:
+            self.scaler = torch.cuda.amp.GradScaler()
+            if self.rank == 0:
+                print(
+                    "✅ FP16/Mixed precision training enabled (using autocast)"
+                )
 
         # Auto-detect DDP: check if model is wrapped with DDP
         # DDP-wrapped models have a 'module' attribute and class name
@@ -120,7 +133,10 @@ class Phase1Trainer:
                     optimizer_lr = optimizer.param_groups[0].get("lr")
                     if optimizer_lr is not None:
                         wandb_config["learning_rate"] = optimizer_lr
-                
+
+                # Add fp16 status
+                wandb_config["use_fp16"] = self.use_fp16
+
                 wandb.init(
                     project=wandb_project or "llava-pretrain",
                     name=wandb_run_name,
@@ -177,19 +193,30 @@ class Phase1Trainer:
             # Zero gradients
             self.optimizer.zero_grad()
 
-            # Forward pass
+            # Forward pass with mixed precision if enabled
             # For each user turn with images:
             # 1. Images → CLIPImageProcessor → pixel_values
             # 2. pixel_values → CLIP encoder → visual features
             # 3. visual features → connector → visual embeddings
             # 4. visual embeddings concatenated with text embeddings
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                images=pixel_values
-            )
-            loss = outputs.loss
+            if self.use_fp16:
+                # Use autocast for mixed precision training
+                with torch.cuda.amp.autocast():
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        images=pixel_values
+                    )
+                    loss = outputs.loss
+            else:
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    images=pixel_values
+                )
+                loss = outputs.loss
 
             # Check for NaN/Inf
             if not torch.isfinite(loss):
@@ -199,18 +226,36 @@ class Phase1Trainer:
                     print(msg)
                 continue
 
-            # Backward pass
-            loss.backward()
+            # Backward pass with gradient scaling if using fp16
+            if self.use_fp16:
+                # Scale loss and backward pass
+                self.scaler.scale(loss).backward()
 
-            # Gradient clipping
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                max_norm=self.max_grad_norm
-            )
+                # Unscale gradients before clipping
+                self.scaler.unscale_(self.optimizer)
 
-            # Optimizer step
-            self.optimizer.step()
-            
+                # Gradient clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.max_grad_norm
+                )
+
+                # Optimizer step with scaling
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                # Standard backward pass
+                loss.backward()
+
+                # Gradient clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.max_grad_norm
+                )
+
+                # Optimizer step
+                self.optimizer.step()
+
             # Learning rate scheduler step
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -271,7 +316,7 @@ class Phase1Trainer:
                     if isinstance(grad_norm, torch.Tensor)
                     else grad_norm
                 )
-                
+
                 log_dict = {
                     "train/loss": loss_value,
                     "train/avg_loss": avg_loss,
@@ -280,11 +325,11 @@ class Phase1Trainer:
                     "train/param_norm": param_norm,
                     "train/learning_rate": current_lr,
                 }
-                
+
                 # Add GPU memory if available
                 if gpu_memory_mb is not None:
                     log_dict["train/gpu_memory_mb"] = gpu_memory_mb
-                
+
                 self.wandb.log(log_dict, step=step)
 
             # Save checkpoint only on rank 0

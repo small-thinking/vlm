@@ -288,6 +288,9 @@ def train(args):
             )
 
     # 5. Initialize Trainer
+    # Determine if fp16 should be enabled (only if CUDA is available)
+    use_fp16 = args.use_fp16 and torch.cuda.is_available()
+
     trainer = Phase1Trainer(
         model=model_for_optimizer,  # Pass DDP model if enabled
         train_dataloader=dataloader,
@@ -299,6 +302,7 @@ def train(args):
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         scheduler=scheduler,
+        use_fp16=use_fp16,
         hyperparams={
             "learning_rate": args.learning_rate,
             "batch_size": args.batch_size,
@@ -318,6 +322,7 @@ def train(args):
             ),
             "ddp_enabled": ddp_enabled,
             "world_size": world_size,
+            "use_fp16": use_fp16,
         }
     )
 
@@ -399,6 +404,13 @@ if __name__ == "__main__":
                         default="llava-pretrain", help="W&B project name")
     parser.add_argument("--wandb_run_name", type=str, default=None,
                         help="W&B run name (default: auto-generated)")
+
+    # Mixed precision args
+    parser.add_argument(
+        "--use_fp16",
+        action="store_true",
+        help="Enable fp16/mixed precision training (requires CUDA)"
+    )
 
     args = parser.parse_args()
     train(args)
