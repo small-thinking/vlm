@@ -10,9 +10,10 @@ import sys
 import zipfile
 import time
 import argparse
+import subprocess
+import shutil
 from pathlib import Path
 import random
-from huggingface_hub import snapshot_download
 
 # Add src to path so we can import vlm
 project_root = Path(__file__).resolve().parent.parent
@@ -21,12 +22,56 @@ sys.path.append(str(project_root / "src"))
 from vlm.data import LLaVAPretrainDataset
 
 def download_dataset(repo_id, local_dir, repo_type="dataset"):
-    """Downloads the dataset using huggingface_hub."""
+    """
+    Downloads the dataset using hf download command.
+    
+    Args:
+        repo_id: Repository ID (e.g., "liuhaotian/LLaVA-Pretrain")
+        local_dir: Local directory to save the dataset
+        repo_type: Type of repository ("dataset" or "model")
+    
+    Returns:
+        bool: True if download succeeded, False otherwise
+    """
     print(f"📦 Downloading {repo_id} to {local_dir}...")
+    
+    # Check if hf command is available
+    hf_cmd = shutil.which("hf")
+    if hf_cmd is None:
+        print("❌ Error: 'hf' command not found. Please install huggingface-cli.")
+        print("   Install with: pip install huggingface-cli")
+        return False
+    
     try:
-        snapshot_download(repo_id=repo_id, repo_type=repo_type, local_dir=local_dir, resume_download=True)
+        # Ensure local_dir exists
+        os.makedirs(local_dir, exist_ok=True)
+        
+        # Build hf download command
+        cmd = [
+            hf_cmd,
+            "download",
+            repo_id,
+            "--repo-type", repo_type,
+            "--local-dir", local_dir,
+            "--resume-download"
+        ]
+        
+        print(f"Running: {' '.join(cmd)}")
+        subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True
+        )
         print("✅ Download complete.")
         return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ hf download failed: {e}")
+        if e.stdout:
+            print(f"stdout: {e.stdout}")
+        if e.stderr:
+            print(f"stderr: {e.stderr}")
+        return False
     except Exception as e:
         print(f"❌ Download failed: {e}")
         return False
