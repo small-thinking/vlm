@@ -2,7 +2,6 @@
 
 import os
 import math
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +30,7 @@ class Phase1Trainer:
         wandb_run_name: Optional[str] = None,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
+        save_checkpoint_interval: int = 100,
     ):
         """Initialize Phase 1 Trainer.
 
@@ -49,16 +49,10 @@ class Phase1Trainer:
             scheduler: Learning rate scheduler (optional)
             hyperparams: Dictionary of hyperparameters to log
                 (e.g., learning_rate, batch_size)
+            save_checkpoint_interval: Interval for saving checkpoints
+                (default: 20 steps)
         """
         self.model = model
-
-        # Phase 1: Freeze VLM/LLM, Train Connector
-        if not self.use_wandb:
-            print(
-                "Phase1Trainer: Setting training stage to 1 (Pretraining)..."
-            )
-        self.model.set_training_stage(1)
-
         self.train_dataloader = train_dataloader
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -68,6 +62,14 @@ class Phase1Trainer:
         self.log_interval = log_interval
         self.max_grad_norm = max_grad_norm
         self.use_wandb = use_wandb
+        self.save_checkpoint_interval = save_checkpoint_interval
+
+        # Phase 1: Freeze VLM/LLM, Train Connector
+        if not self.use_wandb:
+            print(
+                "Phase1Trainer: Setting training stage to 1 (Pretraining)..."
+            )
+        self.model.set_training_stage(1)
         
         # Initialize wandb if enabled
         self.wandb = None
@@ -116,10 +118,6 @@ class Phase1Trainer:
 
         step = 0
         total_loss = 0
-        
-        # Track timing for throughput metrics
-        start_time = time.time()
-        last_log_time = start_time
 
         progress_bar = tqdm(range(self.max_steps), desc="Training")
 
@@ -204,24 +202,6 @@ class Phase1Trainer:
                     param_norm += param.data.norm(2).item() ** 2
             param_norm = math.sqrt(param_norm)
             
-            # Compute throughput metrics
-            current_time = time.time()
-            elapsed_time = current_time - last_log_time
-            steps_per_sec = (
-                1.0 / elapsed_time if elapsed_time > 0 else 0.0
-            )
-            
-            # Estimate tokens per second
-            batch_size = input_ids.size(0) if input_ids is not None else 1
-            seq_len = input_ids.size(1) if input_ids is not None else 0
-            tokens_per_sec = (
-                (batch_size * seq_len) / elapsed_time
-                if elapsed_time > 0 else 0.0
-            )
-            
-            # Track if batch has images (multimodal vs text-only)
-            has_images = 1 if pixel_values is not None else 0
-            
             # Get GPU memory usage if available
             gpu_memory_mb = None
             if self.device.type == "cuda":
@@ -272,10 +252,7 @@ class Phase1Trainer:
                 
                 self.wandb.log(log_dict, step=step)
             
-            last_log_time = current_time
-
-            # Periodic checkpoint saving every 20 steps
-            if step % 20 == 0:
+            if step % self.save_checkpoint_interval == 0:
                 self.save_checkpoint("checkpoint_phase1.pt")
 
             # Early stopping if loss explodes
@@ -285,8 +262,8 @@ class Phase1Trainer:
                 print("Stopping training to prevent further issues.")
                 break
             
-            print("Training completed.")
         self.save_checkpoint("checkpoint_phase1.pt")
+        print("Training completed.")
         
         # Finish wandb run if enabled
         if self.use_wandb and self.wandb is not None:
