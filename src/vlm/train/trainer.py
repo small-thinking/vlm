@@ -68,6 +68,23 @@ class Phase1Trainer:
         self.use_wandb = use_wandb
         self.save_checkpoint_interval = save_checkpoint_interval
 
+        # Auto-detect rank and world_size from environment or dist
+        # (needed early for logging)
+        if dist.is_initialized():
+            self.rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+        else:
+            # Fall back to environment variables or defaults
+            self.rank = int(os.environ.get('RANK', 0))
+            self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+
+        # Auto-detect DDP: check if model is wrapped with DDP
+        # DDP-wrapped models have a 'module' attribute and class name
+        self.ddp_enabled = (
+            hasattr(model, 'module') and
+            type(model).__name__ == 'DistributedDataParallel'
+        )
+
         # Setup fp16/mixed precision training
         self.use_fp16 = use_fp16 and torch.cuda.is_available()
         self.scaler = None
@@ -77,22 +94,6 @@ class Phase1Trainer:
                 print(
                     "✅ FP16/Mixed precision training enabled (using autocast)"
                 )
-
-        # Auto-detect DDP: check if model is wrapped with DDP
-        # DDP-wrapped models have a 'module' attribute and class name
-        self.ddp_enabled = (
-            hasattr(model, 'module') and
-            type(model).__name__ == 'DistributedDataParallel'
-        )
-
-        # Auto-detect rank and world_size from environment or dist
-        if dist.is_initialized():
-            self.rank = dist.get_rank()
-            self.world_size = dist.get_world_size()
-        else:
-            # Fall back to environment variables or defaults
-            self.rank = int(os.environ.get('RANK', 0))
-            self.world_size = int(os.environ.get('WORLD_SIZE', 1))
 
         # Get underlying model if wrapped with DDP
         if self.ddp_enabled:
@@ -264,21 +265,21 @@ class Phase1Trainer:
             loss_value = loss.item()
             total_loss += loss_value
             avg_loss = total_loss / step
-            
+
             # Compute additional metrics
             # Perplexity: exp(loss), capped to avoid overflow
             perplexity = math.exp(min(loss_value, 10.0))
-            
+
             # Get current learning rate
             current_lr = self.optimizer.param_groups[0]["lr"]
-            
+
             # Compute parameter norm (L2 norm of all trainable parameters)
             param_norm = 0.0
             for param in self.model.parameters():
                 if param.requires_grad:
                     param_norm += param.data.norm(2).item() ** 2
             param_norm = math.sqrt(param_norm)
-            
+
             # Get GPU memory usage if available
             gpu_memory_mb = None
             if self.device.type == "cuda":

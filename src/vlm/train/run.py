@@ -290,6 +290,8 @@ def train(args):
     # 5. Initialize Trainer
     # Determine if fp16 should be enabled (only if CUDA is available)
     use_fp16 = args.use_fp16 and torch.cuda.is_available()
+    if rank == 0 and use_fp16:
+        print("✅ FP16/Mixed precision training will be enabled")
 
     trainer = Phase1Trainer(
         model=model_for_optimizer,  # Pass DDP model if enabled
