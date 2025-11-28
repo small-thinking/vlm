@@ -2,7 +2,6 @@
 
 import os
 import math
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +30,7 @@ class Phase1Trainer:
         wandb_run_name: Optional[str] = None,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
+        save_checkpoint_interval: int = 20,
     ):
         """Initialize Phase 1 Trainer.
 
@@ -49,6 +49,8 @@ class Phase1Trainer:
             scheduler: Learning rate scheduler (optional)
             hyperparams: Dictionary of hyperparameters to log
                 (e.g., learning_rate, batch_size)
+            save_checkpoint_interval: Interval for saving checkpoints
+                (default: 20 steps)
         """
         self.model = model
         self.train_dataloader = train_dataloader
@@ -60,6 +62,7 @@ class Phase1Trainer:
         self.log_interval = log_interval
         self.max_grad_norm = max_grad_norm
         self.use_wandb = use_wandb
+        self.save_checkpoint_interval = save_checkpoint_interval
 
         # Phase 1: Freeze VLM/LLM, Train Connector
         if not self.use_wandb:
@@ -115,10 +118,6 @@ class Phase1Trainer:
 
         step = 0
         total_loss = 0
-        
-        # Track timing for throughput metrics
-        start_time = time.time()
-        last_log_time = start_time
 
         progress_bar = tqdm(range(self.max_steps), desc="Training")
 
@@ -253,8 +252,7 @@ class Phase1Trainer:
                 
                 self.wandb.log(log_dict, step=step)
             
-            # Periodic checkpoint saving every 20 steps
-            if step % 20 == 0:
+            if step % self.save_checkpoint_interval == 0:
                 self.save_checkpoint("checkpoint_phase1.pt")
 
             # Early stopping if loss explodes
