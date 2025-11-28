@@ -53,7 +53,10 @@ class Phase1Trainer:
         self.model = model
 
         # Phase 1: Freeze VLM/LLM, Train Connector
-        print("Phase1Trainer: Setting training stage to 1 (Pretraining)...")
+        if not self.use_wandb:
+            print(
+                "Phase1Trainer: Setting training stage to 1 (Pretraining)..."
+            )
         self.model.set_training_stage(1)
 
         self.train_dataloader = train_dataloader
@@ -229,13 +232,15 @@ class Phase1Trainer:
                 # MPS doesn't have direct memory query, skip for now
                 pass
 
-            print(
-                f"Step {step}: Loss: {loss_value:.4f}, "
-                f"Avg Loss: {avg_loss:.4f}, "
-                f"PPL: {perplexity:.2f}, "
-                f"Grad Norm: {grad_norm:.4f}, "
-                f"LR: {current_lr:.2e}"
-            )
+            # Only print logs if wandb is not enabled
+            if not self.use_wandb:
+                print(
+                    f"Step {step}: Loss: {loss_value:.4f}, "
+                    f"Avg Loss: {avg_loss:.4f}, "
+                    f"PPL: {perplexity:.2f}, "
+                    f"Grad Norm: {grad_norm:.4f}, "
+                    f"LR: {current_lr:.2e}"
+                )
             progress_bar.set_postfix({
                 "loss": f"{loss_value:.4f}",
                 "avg_loss": f"{avg_loss:.4f}",
@@ -259,10 +264,6 @@ class Phase1Trainer:
                     "train/grad_norm": grad_norm_val,
                     "train/param_norm": param_norm,
                     "train/learning_rate": current_lr,
-                    "train/steps_per_sec": steps_per_sec,
-                    "train/tokens_per_sec": tokens_per_sec,
-                    "train/has_images": has_images,
-                    "train/step": step,
                 }
                 
                 # Add GPU memory if available
@@ -283,11 +284,8 @@ class Phase1Trainer:
                 print(f"\nError: Loss exploded at step {step}: {loss_value}")
                 print("Stopping training to prevent further issues.")
                 break
-
-            if step >= self.max_steps:
-                break
-
-        print("Training completed.")
+            
+            print("Training completed.")
         self.save_checkpoint("checkpoint_phase1.pt")
         
         # Finish wandb run if enabled
