@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
 """Training script for LLaVA Phase 1 (Pretraining).
 
-Dry run:
+Single GPU/CPU training:
 python src/vlm/train/run.py --data_path \
     ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
-        --image_folder ~/dataset/llava-pretrain \
+    --image_folder ~/dataset/llava-pretrain \
     --max_steps 10 --batch_size 8 --use_cosine_schedule \
---use_wandb --output_dir ~/models/llava
+    --use_wandb --output_dir ~/models/llava
+
+Distributed training (automatically enabled when using torchrun):
+torchrun --nproc_per_node=2 src/vlm/train/run.py --data_path \
+    ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
+    --image_folder ~/dataset/llava-pretrain \
+    --max_steps 10 --batch_size 8 --use_cosine_schedule \
+    --use_wandb --output_dir ~/models/llava
 """
 
 import argparse
 import math
+import os
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
 
 from vlm.configs.data_config import DataConfig
 from vlm.configs.model_config import LLaVAConfig
-from vlm.data.llava_pretrain_dataset import build_pretrain_dataloader
 from vlm.models.llava import LLaVAModel
 from vlm.train.trainer import Phase1Trainer
 
@@ -56,34 +67,100 @@ def get_cosine_schedule_with_warmup(
     return LambdaLR(optimizer, lr_lambda)
 
 
+def setup_ddp(rank: int, world_size: int):
+    """Initialize distributed process group.
+
+    Uses MASTER_ADDR and MASTER_PORT from environment (set by torchrun),
+    or defaults to localhost:29500 if not set.
+
+    Args:
+        rank: Process rank
+        world_size: Total number of processes
+    """
+    # Use environment variables set by torchrun, or defaults
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ['MASTER_ADDR'] = 'localhost'
+    if 'MASTER_PORT' not in os.environ:
+        os.environ['MASTER_PORT'] = '29500'
+
+    backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+    dist.init_process_group(
+        backend=backend,
+        rank=rank,
+        world_size=world_size
+    )
+
+
+def cleanup_ddp():
+    """Clean up distributed process group."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def train(args):
     """Run Phase 1 training."""
-    # 1. Setup Device
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
+    # 1. Auto-detect DDP from environment (set by torchrun)
+    # Check if we're in a distributed environment
+    rank = int(os.environ.get('RANK', -1))
+    local_rank = int(os.environ.get('LOCAL_RANK', -1))
+    world_size = int(os.environ.get('WORLD_SIZE', -1))
+
+    # Enable DDP if environment variables are set and world_size > 1
+    ddp_enabled = (
+        rank >= 0 and
+        local_rank >= 0 and
+        world_size > 1
+    )
+
+    if ddp_enabled:
+        # Initialize DDP (uses MASTER_ADDR/MASTER_PORT from env)
+        setup_ddp(rank, world_size)
+
+        # Set device based on local rank
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{local_rank}")
+            torch.cuda.set_device(local_rank)
+        else:
+            device = torch.device("cpu")
+            if rank == 0:
+                print("Warning: DDP requires CUDA, falling back to CPU")
     else:
-        device = torch.device("cpu")
-    print(f"Using device: {device}")
+        # Single GPU/CPU training
+        rank = 0
+        world_size = 1
+        local_rank = 0
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+
+    if rank == 0:
+        print(f"Using device: {device}")
+        if ddp_enabled:
+            print(
+                f"Distributed training enabled: rank={rank}, "
+                f"local_rank={local_rank}, world_size={world_size}"
+            )
 
     # 2. Initialize Model
-    print("Initializing LLaVA model...")
+    if rank == 0:
+        print("Initializing LLaVA model...")
     config = LLaVAConfig()
     model = LLaVAModel(config)
 
-    # Note: Training stage is set by Phase1Trainer
+    # Wrap model with DDP if enabled
+    ddp_model = model  # Default to model if DDP not enabled
+    if ddp_enabled:
+        model = model.to(device)
+        device_ids = [local_rank] if torch.cuda.is_available() else None
+        ddp_model = DDP(model, device_ids=device_ids)
+        # For accessing the underlying model (e.g., for set_training_stage)
+        model = ddp_model.module
 
-    # Verify trainable parameters (will be set correctly after Trainer init,
-    # but we check here for info)
-    # We temporarily set it here just to print stats, or we can move stats
-    # printing after Trainer init.
-    # Let's move stats printing after Trainer init or just rely on Trainer
-    # doing it.
-    # For now, let's just let Phase1Trainer handle it.
-
-    # 4. Setup Data
-    if not args.use_wandb:
+    # 3. Setup Data
+    if rank == 0 and not args.use_wandb:
         print("Setting up data...")
     data_config = DataConfig(
         data_path=args.data_path,
@@ -97,40 +174,94 @@ def train(args):
     tokenizer = model.language_model.tokenizer
     image_processor = model.vision_encoder.processor
 
-    # Build dataloader
+    # Build dataset
     try:
-        dataloader = build_pretrain_dataloader(
-            config=data_config,
-            tokenizer=tokenizer,
-            image_processor=image_processor
+        from vlm.data.llava_pretrain_dataset import (
+            LLaVAPretrainDataset,
+            collate_fn
         )
-        if not args.use_wandb:
-            print(f"Dataloader created with {len(dataloader)} batches.")
-        
-        # Cap max_steps to actual dataset size if needed
-        actual_max_steps = min(args.max_steps, len(dataloader))
-        if not args.use_wandb:
-            if args.max_steps > len(dataloader):
+        dataset = LLaVAPretrainDataset(
+            data_path=data_config.data_path,
+            image_folder=data_config.image_folder,
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            max_length=data_config.max_length,
+        )
+
+        # Create DistributedSampler if DDP is enabled
+        sampler = None
+        if ddp_enabled:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=data_config.shuffle,
+                drop_last=data_config.drop_last
+            )
+            # Disable shuffle in DataLoader when using DistributedSampler
+            shuffle = False
+        else:
+            shuffle = data_config.shuffle
+
+        # Build dataloader
+        dataloader = DataLoader(
+            dataset,
+            batch_size=data_config.batch_size,
+            num_workers=data_config.num_workers,
+            shuffle=shuffle,
+            sampler=sampler,
+            drop_last=data_config.drop_last,
+            collate_fn=collate_fn,
+            pin_memory=True,
+        )
+
+        if rank == 0:
+            if not args.use_wandb:
                 print(
-                    f"Note: max_steps ({args.max_steps}) > dataset batches "
-                    f"({len(dataloader)}). "
-                    f"Capping max_steps to {actual_max_steps}."
+                    f"Dataloader created with {len(dataloader)} "
+                    f"batches per process."
                 )
-        print(f"Using actual_max_steps: {actual_max_steps} "
-                f"(dataset batches: {len(dataloader)}, "
-                f"requested max_steps: {args.max_steps})")
+            if ddp_enabled:
+                effective_bs = args.batch_size * world_size
+                print(f"Total effective batch size: {effective_bs}")
+
+        # Cap max_steps to actual dataset size if needed
+        # Note: with DDP, each process sees len(dataloader) batches
+        actual_max_steps = min(args.max_steps, len(dataloader))
+        if rank == 0:
+            if not args.use_wandb:
+                if args.max_steps > len(dataloader):
+                    print(
+                        f"Note: max_steps ({args.max_steps}) > "
+                        f"dataset batches ({len(dataloader)}). "
+                        f"Capping max_steps to {actual_max_steps}."
+                    )
+            print(
+                f"Using actual_max_steps: {actual_max_steps} "
+                f"(dataset batches per process: {len(dataloader)}, "
+                f"requested max_steps: {args.max_steps})"
+            )
     except Exception as e:
-        print(f"Error creating dataloader: {e}")
-        print("Please ensure dataset is downloaded using ./setup.sh")
+        if rank == 0:
+            print(f"Error creating dataloader: {e}")
+            print("Please ensure dataset is downloaded using ./setup.sh")
+        if ddp_enabled:
+            cleanup_ddp()
         return
 
-    # 5. Setup Optimizer
+    # 4. Setup Optimizer
     # We need to set stage 1 BEFORE optimizer to know which params
     # require grad
     model.set_training_stage(1)
 
+    # Use DDP model for optimizer if DDP is enabled
+    model_for_optimizer = ddp_model if ddp_enabled else model
+
     optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
+        filter(
+            lambda p: p.requires_grad,
+            model_for_optimizer.parameters()
+        ),
         lr=args.learning_rate
     )
 
@@ -149,15 +280,16 @@ def train(args):
             num_training_steps=actual_max_steps,
             min_lr=min_lr
         )
-        print(
-            f"Using cosine learning rate schedule: "
-            f"T_max={actual_max_steps}, "
-            f"min_lr={min_lr}"
-        )
-    
-    # 6. Initialize Trainer
+        if rank == 0:
+            print(
+                f"Using cosine learning rate schedule: "
+                f"T_max={actual_max_steps}, "
+                f"min_lr={min_lr}"
+            )
+
+    # 5. Initialize Trainer
     trainer = Phase1Trainer(
-        model=model,
+        model=model_for_optimizer,  # Pass DDP model if enabled
         train_dataloader=dataloader,
         optimizer=optimizer,
         device=device,
@@ -170,6 +302,11 @@ def train(args):
         hyperparams={
             "learning_rate": args.learning_rate,
             "batch_size": args.batch_size,
+            "effective_batch_size": (
+                args.batch_size * world_size
+                if ddp_enabled
+                else args.batch_size
+            ),
             "max_length": args.max_length,
             "num_workers": args.num_workers,
             "use_cosine_schedule": args.use_cosine_schedule,
@@ -179,11 +316,18 @@ def train(args):
                 if args.warmup_steps is not None
                 else int(0.01 * actual_max_steps)
             ),
+            "ddp_enabled": ddp_enabled,
+            "world_size": world_size,
         }
     )
 
-    # 7. Start Training
-    trainer.train()
+    # 6. Start Training
+    try:
+        trainer.train()
+    finally:
+        # Cleanup DDP
+        if ddp_enabled:
+            cleanup_ddp()
 
 
 if __name__ == "__main__":
