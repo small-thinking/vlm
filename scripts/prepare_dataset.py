@@ -1,3 +1,10 @@
+"""
+Download and prepare LLaVA-Pretrain dataset.
+
+Example usage:
+    python scripts/prepare_dataset.py --dataset-dir /workspace/dataset/llava-pretrain
+"""
+
 import os
 import sys
 import zipfile
@@ -111,11 +118,23 @@ def main():
     parser.add_argument("--skip-download", action="store_true", help="Skip the download step.")
     parser.add_argument("--skip-unzip", action="store_true", help="Skip the unzip step.")
     parser.add_argument("--skip-verify", action="store_true", help="Skip the verification step.")
+    parser.add_argument(
+        "--dataset-dir",
+        type=str,
+        default=None,
+        help=(
+            "Root directory for the dataset. "
+            "Defaults to ~/dataset/llava-pretrain if not specified."
+        )
+    )
     args = parser.parse_args()
 
     repo_id = "liuhaotian/LLaVA-Pretrain"
-    # Use ~/dataset/llava-pretrain as the dataset location
-    dataset_dir = Path.home() / "dataset" / "llava-pretrain"
+    # Use custom dataset directory if provided, otherwise use ~/dataset/llava-pretrain
+    if args.dataset_dir:
+        dataset_dir = Path(args.dataset_dir)
+    else:
+        dataset_dir = Path.home() / "dataset" / "llava-pretrain"
     zip_file = dataset_dir / "images.zip"
 
     if not args.skip_download:
