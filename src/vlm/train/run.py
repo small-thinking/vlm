@@ -2,11 +2,11 @@
 """Training script for LLaVA Phase 1 (Pretraining).
 
 Dry run:
-uv run src/vlm/train/run.py --data_path \
-    /workspace/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
-        --image_folder /workspace/dataset/llava-pretrain \
-    --max_steps 20000 --batch_size 16 --use_cosine_schedule \
---use_wandb --output_dir /workspace/models/llava
+python src/vlm/train/run.py --data_path \
+    ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
+        --image_folder ~/dataset/llava-pretrain \
+    --max_steps 10 --batch_size 8 --use_cosine_schedule \
+--use_wandb --output_dir ~/models/llava
 """
 
 import argparse
