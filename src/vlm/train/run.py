@@ -2,7 +2,7 @@
 """Training script for LLaVA Phase 1 (Pretraining).
 
 Dry run: 
-uv run src/vlm/train/run.py --data_path ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder ~/dataset/llava-pretrain --max_steps 10 --batch_size 8
+uv run src/vlm/train/run.py --data_path ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder ~/dataset/llava-pretrain --max_steps 2000 --batch_size 8
 """
 
 import argparse

@@ -78,7 +78,7 @@ class Phase1Trainer:
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
             labels = batch['labels'].to(self.device)
-            
+
             # Handle images (may be None for text-only turns)
             pixel_values = None
             if batch.get('pixel_values') is not None:
@@ -134,6 +134,10 @@ class Phase1Trainer:
                 "avg_loss": f"{avg_loss:.4f}",
                 "grad_norm": f"{grad_norm:.4f}"
             })
+
+            # Periodic checkpoint saving every 20 steps
+            if step % 20 == 0:
+                self.save_checkpoint("checkpoint_phase1.pt")
 
             # Early stopping if loss explodes
             if (loss_value > 100.0 or math.isnan(loss_value) or
