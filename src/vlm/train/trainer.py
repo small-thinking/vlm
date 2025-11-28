@@ -30,7 +30,7 @@ class Phase1Trainer:
         wandb_run_name: Optional[str] = None,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
-        save_checkpoint_interval: int = 20,
+        save_checkpoint_interval: int = 100,
     ):
         """Initialize Phase 1 Trainer.
 
