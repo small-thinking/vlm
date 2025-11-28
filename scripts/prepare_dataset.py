@@ -1,3 +1,10 @@
+"""
+Download and prepare LLaVA-Pretrain dataset.
+
+Example usage:
+    python scripts/prepare_dataset.py --dataset-dir /workspace/dataset/llava-pretrain
+"""
+
 import os
 import sys
 import zipfile
