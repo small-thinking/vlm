@@ -1,8 +1,17 @@
 """
-Download and prepare LLaVA-Pretrain dataset.
+Download and prepare LLaVA datasets for Phase 1 and Phase 2 training.
+
+Phase 1: LLaVA-Pretrain dataset (vision-language alignment)
+Phase 2: LLaVA-Instruct-Mix-VSFT dataset (instruction following)
 
 Example usage:
-    python scripts/prepare_dataset.py --dataset-dir /workspace/dataset/llava-pretrain
+    # Phase 1
+    python scripts/prepare_dataset.py --phase 1 \\
+        --dataset-dir /workspace/dataset/llava-pretrain
+
+    # Phase 2
+    python scripts/prepare_dataset.py --phase 2 \\
+        --dataset-dir /workspace/dataset/llava-instruct-mix-vsft
 """
 
 import os
@@ -21,31 +30,32 @@ sys.path.append(str(project_root / "src"))
 
 from vlm.data import LLaVAPretrainDataset
 
+
 def download_dataset(repo_id, local_dir, repo_type="dataset"):
     """
     Downloads the dataset using hf download command.
-    
+
     Args:
         repo_id: Repository ID (e.g., "liuhaotian/LLaVA-Pretrain")
         local_dir: Local directory to save the dataset
         repo_type: Type of repository ("dataset" or "model")
-    
+
     Returns:
         bool: True if download succeeded, False otherwise
     """
     print(f"📦 Downloading {repo_id} to {local_dir}...")
-    
+
     # Check if hf command is available
     hf_cmd = shutil.which("hf")
     if hf_cmd is None:
-        print("❌ Error: 'hf' command not found. Please install huggingface-cli.")
+        print("❌ Error: 'hf' command not found.")
         print("   Install with: pip install huggingface-cli")
         return False
-    
+
     try:
         # Ensure local_dir exists
         os.makedirs(local_dir, exist_ok=True)
-        
+
         # Build hf download command
         cmd = [
             hf_cmd,
@@ -55,7 +65,7 @@ def download_dataset(repo_id, local_dir, repo_type="dataset"):
             "--local-dir", local_dir,
             "--resume-download"
         ]
-        
+
         print(f"Running: {' '.join(cmd)}")
         subprocess.run(
             cmd,
@@ -76,6 +86,7 @@ def download_dataset(repo_id, local_dir, repo_type="dataset"):
         print(f"❌ Download failed: {e}")
         return False
 
+
 def unzip_with_progress(zip_path, extract_to):
     """Unzips a file with a progress bar."""
     if not os.path.exists(zip_path):
@@ -91,21 +102,27 @@ def unzip_with_progress(zip_path, extract_to):
             file_list = zf.infolist()
             total_files = len(file_list)
             print(f"Total files to extract: {total_files}")
-            
+
             start_time = time.time()
             for i, file_info in enumerate(file_list):
                 zf.extract(file_info, extract_to)
-                
+
                 # Update progress every 100 files or if it's the last one
                 if (i + 1) % 100 == 0 or (i + 1) == total_files:
                     percent = (i + 1) / total_files * 100
                     elapsed = time.time() - start_time
                     rate = (i + 1) / elapsed if elapsed > 0 else 0
-                    remaining = (total_files - (i + 1)) / rate if rate > 0 else 0
-                    
-                    sys.stdout.write(f"\rProgress: {percent:.1f}% ({i + 1}/{total_files}) - {rate:.0f} files/s - ETA: {remaining:.0f}s")
+                    remaining = (
+                        (total_files - (i + 1)) / rate if rate > 0 else 0
+                    )
+
+                    progress_msg = (
+                        f"\rProgress: {percent:.1f}% ({i + 1}/{total_files}) "
+                        f"- {rate:.0f} files/s - ETA: {remaining:.0f}s"
+                    )
+                    sys.stdout.write(progress_msg)
                     sys.stdout.flush()
-            
+
             print(f"\n✅ Extraction complete. Extracted to {extract_to}")
 
     except zipfile.BadZipFile:
@@ -113,96 +130,294 @@ def unzip_with_progress(zip_path, extract_to):
     except Exception as e:
         print(f"❌ An error occurred during extraction: {e}")
 
-def verify_dataset(dataset_dir):
-    """Verifies that the dataset can be loaded correctly."""
-    print(f"🔍 Verifying dataset in {dataset_dir}...")
-    
+
+def verify_phase1_dataset(dataset_dir):
+    """Verifies that the Phase 1 dataset can be loaded correctly."""
+    print(f"🔍 Verifying Phase 1 dataset in {dataset_dir}...")
+
     data_path = dataset_dir / "blip_laion_cc_sbu_558k.json"
     image_folder = dataset_dir
-    
+
     if not data_path.exists():
         print(f"❌ Error: Data file {data_path} not found.")
         return False
-        
+
     # Check if at least one image subdirectory exists (e.g. 00000)
-    # The images are stored in numbered subdirectories like 00000, 00001, etc.
+    # Images are stored in numbered subdirectories like 00000, 00001, etc.
     if not (image_folder / "00000").exists():
-        print(f"❌ Error: Image subdirectories (e.g., {image_folder}/00000) not found.")
+        msg = f"❌ Error: Image subdirectories not found: {image_folder}/00000"
+        print(msg)
         return False
-        
+
     try:
         dataset = LLaVAPretrainDataset(
             data_path=str(data_path),
             image_folder=str(image_folder)
         )
-        
+
         print(f"✅ Dataset loaded successfully. Size: {len(dataset)}")
-        
+
         # Verify a few samples
         indices = list(range(min(5, len(dataset))))
         if len(dataset) > 10:
             indices.extend(random.sample(range(5, len(dataset)), 5))
-            
+
         print(f"Testing {len(indices)} samples...")
-        
+
         for idx in indices:
             sample = dataset[idx]
             # Just access the data to make sure it loads
             _ = sample['raw_image']
             _ = sample['raw_text']
-            
+
         print("✅ Verification complete: Random samples loaded successfully.")
         return True
-        
+
     except Exception as e:
         print(f"❌ Verification failed: {e}")
         return False
 
+
+def verify_phase2_dataset(dataset_dir):
+    """Verifies that the Phase 2 dataset can be loaded correctly."""
+    print(f"🔍 Verifying Phase 2 dataset in {dataset_dir}...")
+
+    # Check if parquet files exist
+    parquet_files = list(dataset_dir.glob("*.parquet"))
+    if not parquet_files:
+        print(f"❌ Error: No parquet files found in {dataset_dir}")
+        return False
+
+    print(f"Found {len(parquet_files)} parquet file(s)")
+
+    try:
+        # Try to import datasets library
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            print("❌ Error: 'datasets' library not found.")
+            print("   Install with: pip install datasets")
+            return False
+
+        # Load dataset from local directory
+        dataset = load_dataset(
+            "parquet",
+            data_files=str(parquet_files[0]),
+            split="train"
+        )
+
+        print(f"✅ Dataset loaded successfully. Size: {len(dataset)}")
+        print(f"Dataset features: {list(dataset.features.keys())}")
+
+        # Verify a few samples
+        num_samples = min(5, len(dataset))
+        indices = random.sample(range(len(dataset)), num_samples)
+
+        print(f"Testing {num_samples} samples...")
+
+        for idx in indices:
+            sample = dataset[idx]
+            # Check that messages and images exist
+            if 'messages' not in sample:
+                msg = f"❌ Error: 'messages' field not found in sample {idx}"
+                print(msg)
+                return False
+            if 'images' not in sample:
+                msg = f"❌ Error: 'images' field not found in sample {idx}"
+                print(msg)
+                return False
+
+            # Verify messages is a list
+            messages = sample['messages']
+            if not isinstance(messages, list):
+                msg = f"❌ Error: 'messages' is not a list in sample {idx}"
+                print(msg)
+                return False
+
+            # Verify images is a list
+            images = sample['images']
+            if not isinstance(images, list):
+                msg = f"❌ Error: 'images' is not a list in sample {idx}"
+                print(msg)
+                return False
+
+            print(f"  Sample {idx}: {len(messages)} messages, "
+                  f"{len(images)} images")
+
+        print("✅ Verification complete: Random samples loaded successfully.")
+        return True
+
+    except Exception as e:
+        print(f"❌ Verification failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def prepare_phase1_dataset(
+    dataset_dir, skip_download, skip_unzip, skip_verify
+):
+    """Prepare Phase 1 dataset (LLaVA-Pretrain)."""
+    print("=" * 60)
+    print("Phase 1: LLaVA-Pretrain Dataset Preparation")
+    print("=" * 60)
+
+    repo_id = "liuhaotian/LLaVA-Pretrain"
+    zip_file = dataset_dir / "images.zip"
+
+    if not skip_download:
+        if zip_file.exists():
+            print(f"✅ Dataset already downloaded at {zip_file}")
+        elif not download_dataset(repo_id, str(dataset_dir)):
+            sys.exit(1)
+
+    if not skip_unzip:
+        # Check if the dataset appears to be already extracted
+        extracted_data_path = dataset_dir / "blip_laion_cc_sbu_558k.json"
+        # Check for one of the image subdirectories
+        extracted_image_dir_check = dataset_dir / "00000"
+
+        if (extracted_data_path.exists() and
+                extracted_image_dir_check.exists()):
+            print(f"✅ Dataset already extracted to {dataset_dir}")
+        elif zip_file.exists():
+            print("Dataset not extracted. Extracting...")
+            unzip_with_progress(str(zip_file), str(dataset_dir))
+        else:
+            print(f"⚠️  Zip file not found at {zip_file}. "
+                  "Skipping extraction.")
+
+    if not skip_verify:
+        verify_phase1_dataset(dataset_dir)
+
+
+def prepare_phase2_dataset(dataset_dir, skip_download, skip_verify):
+    """Prepare Phase 2 dataset (LLaVA-Instruct-Mix-VSFT)."""
+    print("=" * 60)
+    print("Phase 2: LLaVA-Instruct-Mix-VSFT Dataset Preparation")
+    print("=" * 60)
+
+    repo_id = "HuggingFaceH4/llava-instruct-mix-vsft"
+
+    if not skip_download:
+        # Check if dataset already exists
+        parquet_files = list(dataset_dir.glob("*.parquet"))
+        if parquet_files:
+            print(f"✅ Dataset already downloaded at {dataset_dir}")
+            print(f"   Found {len(parquet_files)} parquet file(s)")
+        else:
+            print(f"📦 Downloading {repo_id} to {dataset_dir}...")
+
+            # Try using datasets library first (preferred)
+            try:
+                from datasets import load_dataset
+                print("Using 'datasets' library to download...")
+
+                os.makedirs(dataset_dir, exist_ok=True)
+
+                # Download dataset
+                dataset = load_dataset(repo_id, split="train")
+
+                # Save as parquet
+                parquet_path = dataset_dir / "train.parquet"
+                dataset.to_parquet(str(parquet_path))
+
+                print(f"✅ Dataset downloaded and saved to {parquet_path}")
+
+            except ImportError:
+                print("⚠️  'datasets' library not found. Trying hf CLI...")
+                # Fallback to hf CLI
+                if not download_dataset(repo_id, str(dataset_dir)):
+                    print("❌ Download failed. Please install datasets:")
+                    print("   pip install datasets")
+                    sys.exit(1)
+            except Exception as e:
+                print(f"❌ Download failed with datasets library: {e}")
+                print("Trying hf CLI as fallback...")
+                if not download_dataset(repo_id, str(dataset_dir)):
+                    sys.exit(1)
+
+    if not skip_verify:
+        verify_phase2_dataset(dataset_dir)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Download and prepare LLaVA-Pretrain dataset.")
-    parser.add_argument("--skip-download", action="store_true", help="Skip the download step.")
-    parser.add_argument("--skip-unzip", action="store_true", help="Skip the unzip step.")
-    parser.add_argument("--skip-verify", action="store_true", help="Skip the verification step.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download and prepare LLaVA datasets for Phase 1 and Phase 2."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Phase 1 (LLaVA-Pretrain)
+  python scripts/prepare_dataset.py --phase 1 \\
+      --dataset-dir /workspace/dataset/llava-pretrain
+
+  # Phase 2 (LLaVA-Instruct-Mix-VSFT)
+  python scripts/prepare_dataset.py --phase 2 \\
+      --dataset-dir /workspace/dataset/llava-instruct-mix-vsft
+        """
+    )
+    parser.add_argument(
+        "--phase",
+        type=int,
+        choices=[1, 2],
+        required=True,
+        help="Training phase: 1 for pretrain, 2 for instruction following"
+    )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Skip the download step."
+    )
+    parser.add_argument(
+        "--skip-unzip",
+        action="store_true",
+        help="Skip the unzip step (Phase 1 only)."
+    )
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Skip the verification step."
+    )
     parser.add_argument(
         "--dataset-dir",
         type=str,
         default=None,
         help=(
             "Root directory for the dataset. "
-            "Defaults to ~/dataset/llava-pretrain if not specified."
+            "Defaults to ~/dataset/llava-pretrain (phase 1) or "
+            "~/dataset/llava-instruct-mix-vsft (phase 2) if not specified."
         )
     )
     args = parser.parse_args()
 
-    repo_id = "liuhaotian/LLaVA-Pretrain"
-    # Use custom dataset directory if provided, otherwise use ~/dataset/llava-pretrain
+    # Set default dataset directory based on phase
     if args.dataset_dir:
         dataset_dir = Path(args.dataset_dir)
     else:
-        dataset_dir = Path.home() / "dataset" / "llava-pretrain"
-    zip_file = dataset_dir / "images.zip"
-
-    if not args.skip_download:
-        if zip_file.exists():
-            print(f"✅ Dataset already downloaded at {zip_file}")
-        elif not download_dataset(repo_id, str(dataset_dir)):
-            sys.exit(1)
-
-    if not args.skip_unzip:
-        # Check if the dataset appears to be already extracted
-        extracted_data_path = dataset_dir / "blip_laion_cc_sbu_558k.json"
-        extracted_image_dir_check = dataset_dir / "00000" # Check for one of the image subdirectories
-
-        if extracted_data_path.exists() and extracted_image_dir_check.exists():
-            print(f"✅ Dataset already extracted to {dataset_dir}")
-        elif zip_file.exists():
-            print(f"Dataset not extracted. Extracting...")
-            unzip_with_progress(str(zip_file), str(dataset_dir))
+        if args.phase == 1:
+            dataset_dir = Path.home() / "dataset" / "llava-pretrain"
         else:
-            print(f"⚠️  Zip file not found at {zip_file}. Skipping extraction.")
+            dataset_dir = Path.home() / "dataset" / "llava-instruct-mix-vsft"
 
-    if not args.skip_verify:
-        verify_dataset(dataset_dir)
+    # Ensure directory exists
+    os.makedirs(dataset_dir, exist_ok=True)
+
+    if args.phase == 1:
+        prepare_phase1_dataset(
+            dataset_dir,
+            args.skip_download,
+            args.skip_unzip,
+            args.skip_verify
+        )
+    elif args.phase == 2:
+        prepare_phase2_dataset(
+            dataset_dir,
+            args.skip_download,
+            args.skip_verify
+        )
+
 
 if __name__ == "__main__":
     main()
