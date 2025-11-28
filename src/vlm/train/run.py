@@ -109,13 +109,16 @@ def train(args):
         
         # Cap max_steps to actual dataset size if needed
         actual_max_steps = min(args.max_steps, len(dataloader))
-        if args.max_steps > len(dataloader):
-            if not args.use_wandb:
+        if not args.use_wandb:
+            if args.max_steps > len(dataloader):
                 print(
                     f"Note: max_steps ({args.max_steps}) > dataset batches "
                     f"({len(dataloader)}). "
                     f"Capping max_steps to {actual_max_steps}."
                 )
+        print(f"Using actual_max_steps: {actual_max_steps} "
+                f"(dataset batches: {len(dataloader)}, "
+                f"requested max_steps: {args.max_steps})")
     except Exception as e:
         print(f"Error creating dataloader: {e}")
         print("Please ensure dataset is downloaded using ./setup.sh")
