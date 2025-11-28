@@ -51,14 +51,6 @@ class Phase1Trainer:
                 (e.g., learning_rate, batch_size)
         """
         self.model = model
-
-        # Phase 1: Freeze VLM/LLM, Train Connector
-        if not self.use_wandb:
-            print(
-                "Phase1Trainer: Setting training stage to 1 (Pretraining)..."
-            )
-        self.model.set_training_stage(1)
-
         self.train_dataloader = train_dataloader
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -68,6 +60,13 @@ class Phase1Trainer:
         self.log_interval = log_interval
         self.max_grad_norm = max_grad_norm
         self.use_wandb = use_wandb
+
+        # Phase 1: Freeze VLM/LLM, Train Connector
+        if not self.use_wandb:
+            print(
+                "Phase1Trainer: Setting training stage to 1 (Pretraining)..."
+            )
+        self.model.set_training_stage(1)
         
         # Initialize wandb if enabled
         self.wandb = None

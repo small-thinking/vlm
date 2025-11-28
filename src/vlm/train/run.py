@@ -138,7 +138,7 @@ def train(args):
         warmup_steps = (
             args.warmup_steps
             if args.warmup_steps is not None
-            else int(0.1 * actual_max_steps)
+            else int(0.01 * actual_max_steps)
         )
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
