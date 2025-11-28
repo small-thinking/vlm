@@ -13,7 +13,7 @@ torchrun --nproc_per_node=2 src/vlm/train/run.py --data_path \
     ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
     --image_folder ~/dataset/llava-pretrain \
     --max_steps 10 --batch_size 8 --use_cosine_schedule \
-    --use_wandb --output_dir ~/models/llava
+    --use_wandb --output_dir ~/models/llava --learning_rate 2e-3
 """
 
 import argparse
