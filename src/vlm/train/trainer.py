@@ -203,24 +203,6 @@ class Phase1Trainer:
                     param_norm += param.data.norm(2).item() ** 2
             param_norm = math.sqrt(param_norm)
             
-            # Compute throughput metrics
-            current_time = time.time()
-            elapsed_time = current_time - last_log_time
-            steps_per_sec = (
-                1.0 / elapsed_time if elapsed_time > 0 else 0.0
-            )
-            
-            # Estimate tokens per second
-            batch_size = input_ids.size(0) if input_ids is not None else 1
-            seq_len = input_ids.size(1) if input_ids is not None else 0
-            tokens_per_sec = (
-                (batch_size * seq_len) / elapsed_time
-                if elapsed_time > 0 else 0.0
-            )
-            
-            # Track if batch has images (multimodal vs text-only)
-            has_images = 1 if pixel_values is not None else 0
-            
             # Get GPU memory usage if available
             gpu_memory_mb = None
             if self.device.type == "cuda":
@@ -271,8 +253,6 @@ class Phase1Trainer:
                 
                 self.wandb.log(log_dict, step=step)
             
-            last_log_time = current_time
-
             # Periodic checkpoint saving every 20 steps
             if step % 20 == 0:
                 self.save_checkpoint("checkpoint_phase1.pt")
@@ -284,8 +264,8 @@ class Phase1Trainer:
                 print("Stopping training to prevent further issues.")
                 break
             
-            print("Training completed.")
         self.save_checkpoint("checkpoint_phase1.pt")
+        print("Training completed.")
         
         # Finish wandb run if enabled
         if self.use_wandb and self.wandb is not None:
