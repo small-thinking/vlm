@@ -5,7 +5,7 @@ Dry run:
 uv run src/vlm/train/run.py --data_path \
     /workspace/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
         --image_folder /workspace/dataset/llava-pretrain \
-    --max_steps 20000 --batch_size 16 --num_workers 4 --use_cosine_schedule \
+    --max_steps 20000 --batch_size 16 --use_cosine_schedule \
 --use_wandb --output_dir /workspace/models/llava
 """
 
@@ -106,6 +106,16 @@ def train(args):
         )
         if not args.use_wandb:
             print(f"Dataloader created with {len(dataloader)} batches.")
+        
+        # Cap max_steps to actual dataset size if needed
+        actual_max_steps = min(args.max_steps, len(dataloader))
+        if args.max_steps > len(dataloader):
+            if not args.use_wandb:
+                print(
+                    f"Note: max_steps ({args.max_steps}) > dataset batches "
+                    f"({len(dataloader)}). "
+                    f"Capping max_steps to {actual_max_steps}."
+                )
     except Exception as e:
         print(f"Error creating dataloader: {e}")
         print("Please ensure dataset is downloaded using ./setup.sh")
@@ -128,18 +138,18 @@ def train(args):
         warmup_steps = (
             args.warmup_steps
             if args.warmup_steps is not None
-            else int(0.1 * args.max_steps)
+            else int(0.1 * actual_max_steps)
         )
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=warmup_steps,
-            num_training_steps=args.max_steps,
+            num_training_steps=actual_max_steps,
             min_lr=min_lr
         )
         print(
             f"Using cosine learning rate schedule: "
-            f"T_max={args.max_steps}, "
-            f"eta_min={scheduler.eta_min}"
+            f"T_max={actual_max_steps}, "
+            f"min_lr={min_lr}"
         )
     
     # 6. Initialize Trainer
@@ -149,7 +159,7 @@ def train(args):
         optimizer=optimizer,
         device=device,
         output_dir=args.output_dir,
-        max_steps=args.max_steps,
+        max_steps=actual_max_steps,
         use_wandb=args.use_wandb,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
@@ -164,7 +174,7 @@ def train(args):
             "warmup_steps": (
                 args.warmup_steps
                 if args.warmup_steps is not None
-                else int(0.1 * args.max_steps)
+                else int(0.01 * actual_max_steps)
             ),
         }
     )
