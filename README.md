@@ -4,6 +4,10 @@ Replicating the LLaVA series of vision-language models.
 
 ![LLaVA Model Architecture](resources/llava-qwen.png)
 
+## Early result from phase 1 training
+
+![Pretrain Examples](resources/examples.png)
+
 ## Setup
 
 ```bash
