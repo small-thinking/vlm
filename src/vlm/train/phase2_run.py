@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-"""Training script for LLaVA Phase 1 (Pretraining).
+"""Training script for LLaVA Phase 2 (Instruction Tuning).
 
 Single GPU/CPU training:
-python src/vlm/train/phase1_run.py --data_path \
-    ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
-    --image_folder ~/dataset/llava-pretrain \
-    --max_steps 10 --batch_size 8 --use_cosine_schedule \
+python src/vlm/train/phase2_run.py \
+    --checkpoint ~/models/llava/checkpoint_phase1.pt \
+    --data_path ~/dataset/llava-instruct-mix \
+    --max_steps 10 --batch_size 2 --use_cosine_schedule \
     --use_wandb --output_dir ~/models/llava
 
 Distributed training (automatically enabled when using torchrun):
-torchrun --nproc_per_node=2 src/vlm/train/phase1_run.py --data_path \
-    ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
-    --image_folder ~/dataset/llava-pretrain \
-    --max_steps 10000 --batch_size 64 --use_cosine_schedule \
+torchrun --nproc_per_node=2 src/vlm/train/phase2_run.py \
+    --checkpoint ~/models/llava/checkpoint_phase1.pt \
+    --data_path ~/dataset/llava-instruct-mix \
+    --max_steps 10000 --batch_size 32 --use_cosine_schedule \
     --gradient_accumulation_steps 4 --use_fp16 \
-    --output_dir ~/models/llava --learning_rate 2e-3
+    --output_dir ~/models/llava --learning_rate 2e-5
+
+Note: --data_path should point to a folder containing parquet files.
+All .parquet files in the folder will be loaded and concatenated.
 """
 
 import argparse
 import math
 import os
+from pathlib import Path
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -28,10 +32,10 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
-from vlm.configs.data_config import Phase1DataConfig
+from vlm.configs.data_config import Phase2DataConfig
 from vlm.configs.model_config import LLaVAConfig
 from vlm.models.llava import LLaVAModel
-from vlm.train.phase1_trainer import Phase1Trainer
+from vlm.train.phase2_trainer import Phase2Trainer
 
 
 def get_cosine_schedule_with_warmup(
@@ -99,7 +103,7 @@ def cleanup_ddp():
 
 
 def train(args):
-    """Run Phase 1 training."""
+    """Run Phase 2 training."""
     # 1. Auto-detect DDP from environment (set by torchrun)
     # Check if we're in a distributed environment
     rank = int(os.environ.get('RANK', -1))
@@ -151,6 +155,27 @@ def train(args):
     config = LLaVAConfig()
     model = LLaVAModel(config)
 
+    # Load checkpoint if provided (Phase 2 fine-tunes from Phase 1 checkpoint)
+    if args.checkpoint:
+        checkpoint_path = Path(args.checkpoint).expanduser()
+        if not checkpoint_path.exists():
+            if rank == 0:
+                print(f"Error: Checkpoint not found: {checkpoint_path}")
+                print(
+                    "Please provide a valid checkpoint path with --checkpoint"
+                )
+            if ddp_enabled:
+                cleanup_ddp()
+            return
+
+        if rank == 0:
+            print(f"Loading checkpoint from {checkpoint_path}...")
+        # Load checkpoint to CPU first, then move to device
+        checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
+        model.load_state_dict(checkpoint, strict=False)
+        if rank == 0:
+            print("✅ Checkpoint loaded successfully")
+
     # Wrap model with DDP if enabled
     ddp_model = model  # Default to model if DDP not enabled
     if ddp_enabled:
@@ -159,11 +184,14 @@ def train(args):
         ddp_model = DDP(model, device_ids=device_ids)
         # For accessing the underlying model (e.g., for set_training_stage)
         model = ddp_model.module
+    else:
+        # Move model to device if not using DDP
+        model = model.to(device)
 
     # 3. Setup Data
     if rank == 0 and not args.use_wandb:
         print("Setting up data...")
-    data_config = Phase1DataConfig(
+    data_config = Phase2DataConfig(
         data_path=args.data_path,
         image_folder=args.image_folder,
         batch_size=args.batch_size,
@@ -177,11 +205,11 @@ def train(args):
 
     # Build dataset
     try:
-        from vlm.data.llava_pretrain_dataset import (
-            LLaVAPretrainDataset,
+        from vlm.data.llava_instruct_dataset import (
+            LLaVAInstructDataset,
             collate_fn
         )
-        dataset = LLaVAPretrainDataset(
+        dataset = LLaVAInstructDataset(
             data_path=data_config.data_path,
             image_folder=data_config.image_folder,
             image_processor=image_processor,
@@ -251,9 +279,9 @@ def train(args):
         return
 
     # 4. Setup Optimizer
-    # We need to set stage 1 BEFORE optimizer to know which params
-    # require grad
-    model.set_training_stage(1)
+    # We need to set stage 2 BEFORE optimizer to know which params
+    # require grad (connector + LLM, vision encoder frozen)
+    model.set_training_stage(2)
 
     # Use DDP model for optimizer if DDP is enabled
     model_for_optimizer = ddp_model if ddp_enabled else model
@@ -308,7 +336,7 @@ def train(args):
             f"(effective batch size: {effective_batch_size})"
         )
 
-    trainer = Phase1Trainer(
+    trainer = Phase2Trainer(
         model=model_for_optimizer,  # Pass DDP model if enabled
         train_dataloader=dataloader,
         optimizer=optimizer,
@@ -352,22 +380,25 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="LLaVA Phase 1 Training Sketch"
+        description="LLaVA Phase 2 Training (Instruction Tuning)"
     )
 
     # Data args
     parser.add_argument(
         "--data_path",
         type=str,
-        default="~/dataset/llava-pretrain/"
-        "blip_laion_cc_sbu_558k.json",
-        help="Path to dataset JSON"
+        default="~/dataset/llava-instruct",
+        help="Path to folder containing parquet files"
     )
     parser.add_argument(
         "--image_folder",
         type=str,
-        default="~/dataset/llava-pretrain",
-        help="Path to image folder"
+        default=None,
+        help=(
+            "Path to image folder (optional). "
+            "Only needed if images are stored separately. "
+            "If images are embedded in the JSON, leave this unset."
+        )
     )
 
     # Training args
@@ -375,15 +406,26 @@ if __name__ == "__main__":
                         help="Batch size")
     parser.add_argument("--num_workers", type=int, default=8,
                         help="Number of dataloader workers")
-    parser.add_argument("--max_length", type=int, default=512,
+    parser.add_argument("--max_length", type=int, default=768,
                         help="Max sequence length")
-    parser.add_argument("--learning_rate", type=float, default=3e-4,
+    parser.add_argument("--learning_rate", type=float, default=2e-5,
                         help="Learning rate")
     parser.add_argument("--max_steps", type=int, default=10,
                         help="Number of training steps for sketch")
     parser.add_argument("--output_dir", type=str,
                         default="~/checkpoints/llava",
                         help="Output directory")
+
+    # Checkpoint args
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Path to Phase 1 checkpoint file "
+            "(required for Phase 2 fine-tuning)"
+        )
+    )
 
     # Learning rate schedule args
     parser.add_argument(
@@ -416,7 +458,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_wandb", action="store_true",
                         help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str,
-                        default="llava-pretrain", help="W&B project name")
+                        default="llava-instruct", help="W&B project name")
     parser.add_argument("--wandb_run_name", type=str, default=None,
                         help="W&B run name (default: auto-generated)")
 
@@ -439,4 +481,12 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    # Validate checkpoint is provided
+    if not args.checkpoint:
+        parser.error(
+            "Phase 2 training requires a checkpoint from Phase 1. "
+            "Please provide --checkpoint <path_to_phase1_checkpoint.pt>"
+        )
+
     train(args)

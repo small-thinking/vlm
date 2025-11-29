@@ -1,7 +1,6 @@
 """LLaVA Instruct Dataset for Phase 2 training.
 """
 import io
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import torch
@@ -10,17 +9,26 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import CLIPImageProcessor
 import numpy as np
 
-from vlm.configs.data_config import DataConfig
+try:
+    import pandas as pd
+except ImportError:
+    raise ImportError(
+        "pandas is required for Phase 2 training. "
+        "Install with: pip install pandas pyarrow"
+    )
+
+from vlm.configs.data_config import Phase2DataConfig
 
 
 class LLaVAInstructDataset(Dataset):
     """Dataset for LLaVA Phase 2 instruction tuning.
-    
+
     Args:
-        data_path: Path to the dataset JSON file
-        image_folder: Path to the folder containing images (optional)
+        data_path: Path to folder containing parquet files (or single file)
+        image_folder: Path to folder containing images (optional)
             If None, images are expected to be embedded in the dataset
-        image_processor: Processor for vision encoder (e.g., CLIPImageProcessor)
+        image_processor: Processor for vision encoder
+            (e.g., CLIPImageProcessor)
         tokenizer: Tokenizer for language model
         max_length: Maximum sequence length (includes visual tokens)
         num_visual_tokens: Number of visual tokens from vision encoder
@@ -37,7 +45,7 @@ class LLaVAInstructDataset(Dataset):
         num_visual_tokens: int = 257,  # CLIP ViT-L/14: 256 patches + 1 CLS
     ):
         # Expand ~ to home directory for both paths
-        self.data_path = str(Path(data_path).expanduser())
+        data_path_expanded = Path(data_path).expanduser()
         self.image_folder = (
             Path(image_folder).expanduser() if image_folder else None
         )
@@ -46,16 +54,53 @@ class LLaVAInstructDataset(Dataset):
         self.max_length = max_length
         self.num_visual_tokens = num_visual_tokens
         
-        # Load dataset from JSON file
-        print(f"Loading dataset from {self.data_path}...")
-        with open(self.data_path, 'r') as f:
-            self.raw_data = json.load(f)
+        # Load dataset from parquet files in folder
+        print(f"Loading dataset from folder: {data_path_expanded}...")
+        
+        # Find all parquet files in the folder
+        if data_path_expanded.is_file():
+            # If it's a file, use it directly
+            parquet_files = [data_path_expanded]
+        elif data_path_expanded.is_dir():
+            # If it's a directory, find all parquet files
+            parquet_files = sorted(
+                data_path_expanded.glob("*.parquet")
+            )
+            if not parquet_files:
+                raise ValueError(
+                    f"No parquet files found in directory: "
+                    f"{data_path_expanded}"
+                )
+        else:
+            raise ValueError(
+                f"Data path must be a file or directory: {data_path_expanded}"
+            )
+        
+        print(f"Found {len(parquet_files)} parquet file(s)")
+        
+        # Load all parquet files and concatenate
+        dataframes = []
+        for parquet_file in parquet_files:
+            print(f"  Loading {parquet_file.name}...")
+            df = pd.read_parquet(parquet_file)
+            dataframes.append(df)
+        
+        # Concatenate all dataframes
+        combined_df = pd.concat(dataframes, ignore_index=True)
+        print(f"Loaded {len(combined_df)} total samples")
+        
+        # Convert DataFrame to list of dicts for compatibility
+        # with existing code
+        self.raw_data = combined_df.to_dict('records')
         
         # Build lightweight index: (conversation_idx, turn_start_idx) tuples
         # Only stores indices, not actual data - suitable for huge datasets
         print("Building sample index...")
         self.index = self._build_index()
-        print(f"Indexed {len(self.index)} samples from {len(self.raw_data)} conversations.")
+        print(
+            f"Indexed {len(self.index)} samples from "
+            f"{len(self.raw_data)} conversations."
+        )
     
     def __len__(self) -> int:
         """Return the number of training samples."""
@@ -67,8 +112,10 @@ class LLaVAInstructDataset(Dataset):
         Only stores indices, not data. Suitable for huge datasets.
         
         Supports multiple formats:
-        - LLaVA format: conversations = [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]
-        - HuggingFace chat format: messages = [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+        - LLaVA format: conversations = [{"from": "human", "value": "..."},
+          {"from": "gpt", "value": "..."}]
+        - HuggingFace chat format: messages = [{"role": "user",
+          "content": "..."}, {"role": "assistant", "content": "..."}]
         """
         index = []
         for conv_idx, sample in enumerate(self.raw_data):
@@ -389,14 +436,14 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def build_instruct_dataloader(
-    config: DataConfig,
+    config: Phase2DataConfig,
     tokenizer: Any,
     image_processor: CLIPImageProcessor,
 ) -> DataLoader:
     """Build DataLoader for LLaVA instruction tuning.
     
     Args:
-        config: Data configuration (must have data_path and image_folder)
+        config: Phase 2 data configuration (image_folder is optional)
         tokenizer: Tokenizer for language model
         image_processor: Image processor for vision encoder
         
