@@ -27,6 +27,7 @@ Verify installation:
 ```bash
 conda run -n vlm_env python scripts/verify_pytorch.py
 conda run -n vlm_env python scripts/verify_llava.py
+conda run -n vlm_env python scripts/verify_instruct_dataset.py
 ```
 
 Or if you've activated the environment:
@@ -34,6 +35,7 @@ Or if you've activated the environment:
 conda activate vlm_env
 python scripts/verify_pytorch.py
 python scripts/verify_llava.py
+python scripts/verify_instruct_dataset.py
 ```
 
 ## Dataset
