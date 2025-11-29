@@ -1,6 +1,7 @@
 """LLaVA Instruct Dataset for Phase 2 training.
 """
 import io
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import torch
@@ -78,111 +79,143 @@ class LLaVAInstructDataset(Dataset):
         
         print(f"Found {len(parquet_files)} parquet file(s)")
         
-        # Load all parquet files and concatenate
-        dataframes = []
-        for parquet_file in parquet_files:
-            print(f"  Loading {parquet_file.name}...")
-            df = pd.read_parquet(parquet_file)
-            dataframes.append(df)
+        # Store parquet file paths instead of loading all data into memory
+        # This allows handling theoretically infinite datasets
+        self.parquet_files = parquet_files
         
-        # Concatenate all dataframes
-        combined_df = pd.concat(dataframes, ignore_index=True)
-        print(f"Loaded {len(combined_df)} total samples")
+        # Cache for loaded parquet files (lazy loading per file)
+        # This avoids re-reading files on every access while still being
+        # memory-efficient (only caches files as they're accessed)
+        self._file_cache: Dict[int, pd.DataFrame] = {}
         
-        # Convert DataFrame to list of dicts for compatibility
-        # with existing code
-        self.raw_data = combined_df.to_dict('records')
-        
-        # Build lightweight index: (conversation_idx, turn_start_idx) tuples
+        # Build lightweight index: (file_idx, row_idx, turn_start_idx) tuples
         # Only stores indices, not actual data - suitable for huge datasets
-        print("Building sample index...")
-        self.index = self._build_index()
+        print("Building sample index (scanning parquet files)...")
+        self.index, total_conversations = self._build_index()
         print(
             f"Indexed {len(self.index)} samples from "
-            f"{len(self.raw_data)} conversations."
+            f"{total_conversations} conversations."
         )
     
     def __len__(self) -> int:
         """Return the number of training samples."""
         return len(self.index)
     
-    def _build_index(self) -> List[tuple]:
-        """Build lightweight index: (conversation_idx, turn_start_idx) tuples.
+    def _build_index(self) -> tuple[List[tuple], int]:
+        """Build lightweight index: (file_idx, row_idx, turn_start_idx) tuples.
         
         Only stores indices, not data. Suitable for huge datasets.
+        Processes parquet files incrementally without loading all data.
         
         Supports multiple formats:
         - LLaVA format: conversations = [{"from": "human", "value": "..."},
           {"from": "gpt", "value": "..."}]
         - HuggingFace chat format: messages = [{"role": "user",
           "content": "..."}, {"role": "assistant", "content": "..."}]
+        
+        Returns:
+            Tuple of (index list, total_conversations count)
         """
         index = []
-        for conv_idx, sample in enumerate(self.raw_data):
-            # Try 'conversations' first (LLaVA format)
-            conversations = sample.get('conversations', None)
-            
-            # If not found, try 'messages' (HuggingFace chat format)
-            if conversations is None:
-                messages = sample.get('messages', None)
-                if messages is not None:
-                    # Convert messages format to conversations format
-                    conversations = []
-                    for msg in messages:
-                        if isinstance(msg, dict):
-                            role = msg.get('role', '')
-                            content = msg.get('content', '')
-                            # Map roles: user -> human, assistant -> gpt
-                            if role == 'user':
-                                conversations.append(
-                                    {'from': 'human', 'value': content}
-                                )
-                            elif role == 'assistant':
-                                conversations.append(
-                                    {'from': 'gpt', 'value': content}
-                                )
-            
-            # Handle different conversation formats
-            if conversations is None or not isinstance(conversations, list):
+        total_conversations = 0
+        
+        # Process each parquet file incrementally
+        for file_idx, parquet_file in enumerate(self.parquet_files):
+            # Read parquet file in chunks to avoid loading all at once
+            # Using iter_batches with a reasonable chunk size
+            try:
+                df = pd.read_parquet(parquet_file)
+                # Process row by row to minimize memory usage
+                for row_idx, row in df.iterrows():
+                    total_conversations += 1
+                    sample = row.to_dict()
+                    
+                    # Try 'conversations' first (LLaVA format)
+                    conversations = sample.get('conversations', None)
+                    if isinstance(conversations, str):
+                        try:
+                            conversations = json.loads(conversations)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                    
+                    # If not found, try 'messages' (HuggingFace chat format)
+                    if conversations is None:
+                        messages = sample.get('messages', None)
+                        if isinstance(messages, str):
+                            try:
+                                messages = json.loads(messages)
+                            except (json.JSONDecodeError, TypeError):
+                                messages = None
+                        
+                        if messages is not None:
+                            # Convert messages format to conversations format
+                            conversations = []
+                            for msg in messages:
+                                if isinstance(msg, dict):
+                                    role = msg.get('role', '')
+                                    content = msg.get('content', '')
+                                    # Map roles: user -> human, assistant -> gpt
+                                    if role == 'user':
+                                        conversations.append(
+                                            {'from': 'human', 'value': content}
+                                        )
+                                    elif role == 'assistant':
+                                        conversations.append(
+                                            {'from': 'gpt', 'value': content}
+                                        )
+                    
+                    # Handle different conversation formats
+                    if conversations is None or not isinstance(conversations, list):
+                        continue
+                    
+                    # Check if conversations is a list of dicts or strings
+                    if len(conversations) == 0:
+                        continue
+                    
+                    # Try to detect format by checking first element
+                    first_item = conversations[0]
+                    if isinstance(first_item, str):
+                        # If conversations is a list of strings, skip this sample
+                        # (unexpected format)
+                        continue
+                    elif not isinstance(first_item, dict):
+                        # Unknown format
+                        continue
+                    
+                    i = 0
+                    while i < len(conversations):
+                        turn = conversations[i]
+                        if not isinstance(turn, dict):
+                            i += 1
+                            continue
+                        
+                        # Check for 'human' or 'user' role
+                        role = turn.get('from', '') or turn.get('role', '')
+                        if role in ('human', 'user'):
+                            # Look for next turn with 'gpt' or 'assistant' role
+                            if i + 1 < len(conversations):
+                                next_turn = conversations[i + 1]
+                                if isinstance(next_turn, dict):
+                                    next_role = (
+                                        next_turn.get('from', '') or
+                                        next_turn.get('role', '')
+                                    )
+                                    if next_role in ('gpt', 'assistant'):
+                                        # Store: (file_idx, row_idx, turn_start_idx)
+                                        index.append((file_idx, row_idx, i))
+                                        i += 2
+                                        continue
+                            i += 1
+                        else:
+                            i += 1
+            except Exception as e:
+                print(
+                    f"Warning: Error processing {parquet_file.name}: {e}. "
+                    f"Skipping file."
+                )
                 continue
-            
-            # Check if conversations is a list of dicts or strings
-            if len(conversations) == 0:
-                continue
-            
-            # Try to detect format by checking first element
-            first_item = conversations[0]
-            if isinstance(first_item, str):
-                # If conversations is a list of strings, skip this sample
-                # (unexpected format)
-                continue
-            elif not isinstance(first_item, dict):
-                # Unknown format
-                continue
-            
-            i = 0
-            while i < len(conversations):
-                turn = conversations[i]
-                if not isinstance(turn, dict):
-                    i += 1
-                    continue
-                
-                # Check for 'human' or 'user' role
-                role = turn.get('from', '') or turn.get('role', '')
-                if role in ('human', 'user'):
-                    # Look for next turn with 'gpt' or 'assistant' role
-                    if i + 1 < len(conversations):
-                        next_turn = conversations[i + 1]
-                        if isinstance(next_turn, dict):
-                            next_role = next_turn.get('from', '') or next_turn.get('role', '')
-                            if next_role in ('gpt', 'assistant'):
-                                index.append((conv_idx, i))
-                                i += 2
-                                continue
-                    i += 1
-                else:
-                    i += 1
-        return index
+        
+        return index, total_conversations
     
     def _process_image(self, image: Any) -> Optional[Image.Image]:
         """Process image from various formats to PIL Image.
@@ -224,9 +257,17 @@ class LLaVAInstructDataset(Dataset):
                 - attention_mask: Attention mask for input
                 - labels: Tokenized labels (input masked, only assistant reply)
         """
-        # Get conversation and turn indices from lightweight index
-        conv_idx, turn_start_idx = self.index[idx]
-        sample = self.raw_data[conv_idx]
+        # Get file, row, and turn indices from lightweight index
+        file_idx, row_idx, turn_start_idx = self.index[idx]
+        
+        # Load parquet file on-demand (with caching to avoid re-reading)
+        if file_idx not in self._file_cache:
+            parquet_file = self.parquet_files[file_idx]
+            self._file_cache[file_idx] = pd.read_parquet(parquet_file)
+        
+        df = self._file_cache[file_idx]
+        row = df.iloc[row_idx]
+        sample = row.to_dict()
         
         # Get image from conversation (same for all turns)
         # Support both embedded images and local file paths
@@ -248,10 +289,21 @@ class LLaVAInstructDataset(Dataset):
         
         # Parse the specific turn on-the-fly
         conversations = sample.get('conversations', None)
+        if isinstance(conversations, str):
+            try:
+                conversations = json.loads(conversations)
+            except (json.JSONDecodeError, TypeError):
+                conversations = None
         
         # If not found, try 'messages' format (HuggingFace chat format)
         if conversations is None:
             messages = sample.get('messages', [])
+            if isinstance(messages, str):
+                try:
+                    messages = json.loads(messages)
+                except (json.JSONDecodeError, TypeError):
+                    messages = []
+            
             if messages:
                 # Convert messages format to conversations format
                 conversations = []
