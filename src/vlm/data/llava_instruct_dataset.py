@@ -23,7 +23,21 @@ from vlm.configs.data_config import Phase2DataConfig
 
 class LLaVAInstructDataset(Dataset):
     """Dataset for LLaVA Phase 2 instruction tuning.
-
+    
+    This dataset is designed to be memory-efficient and supports:
+    - Incremental loading: Only loads parquet files on-demand
+    - Multi-worker DataLoader: Each worker process has independent state
+    - Large datasets: Can handle theoretically infinite datasets
+    
+    Multi-worker Safety:
+    - Each worker process gets its own dataset instance (via pickling)
+    - Each worker has its own file cache (no shared state, no race conditions)
+    - DataLoader's sampler ensures no data duplication between workers
+    - File I/O is read-only and process-safe
+    
+    Note: Each worker will build its own index during initialization.
+    This is redundant but necessary for process isolation.
+    
     Args:
         data_path: Path to folder containing parquet files (or single file)
         image_folder: Path to folder containing images (optional)
@@ -86,10 +100,13 @@ class LLaVAInstructDataset(Dataset):
         # Cache for loaded parquet files (lazy loading per file)
         # This avoids re-reading files on every access while still being
         # memory-efficient (only caches files as they're accessed)
+        # Note: Each worker process has its own cache (no shared state)
         self._file_cache: Dict[int, pd.DataFrame] = {}
         
         # Build lightweight index: (file_idx, row_idx, turn_start_idx) tuples
         # Only stores indices, not actual data - suitable for huge datasets
+        # Note: With multi-worker DataLoader, each worker will build its own
+        # index independently. This is redundant but necessary for process isolation.
         print("Building sample index (scanning parquet files)...")
         self.index, total_conversations = self._build_index()
         print(
@@ -261,8 +278,11 @@ class LLaVAInstructDataset(Dataset):
         file_idx, row_idx, turn_start_idx = self.index[idx]
         
         # Load parquet file on-demand (with caching to avoid re-reading)
+        # This is safe for multi-worker DataLoader: each worker process
+        # has its own _file_cache instance (no shared state, no race conditions)
         if file_idx not in self._file_cache:
             parquet_file = self.parquet_files[file_idx]
+            # Read-only file I/O is process-safe
             self._file_cache[file_idx] = pd.read_parquet(parquet_file)
         
         df = self._file_cache[file_idx]

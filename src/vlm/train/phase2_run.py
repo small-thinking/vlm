@@ -11,9 +11,9 @@ python src/vlm/train/phase2_run.py \
 Distributed training (automatically enabled when using torchrun):
 torchrun --nproc_per_node=2 src/vlm/train/phase2_run.py \
     --checkpoint ~/models/llava/checkpoint_phase1.pt \
-    --data_path ~/dataset/llava-instruct-mix \
-    --max_steps 10000 --batch_size 32 --use_cosine_schedule \
-    --gradient_accumulation_steps 4 --use_fp16 \
+    --data_path ~/dataset/llava-instruct-mix/data \
+    --max_steps 10000 --batch_size 16 --use_cosine_schedule \
+    --gradient_accumulation_steps 2 --use_fp16 \
     --output_dir ~/models/llava --learning_rate 2e-5
 
 Note: --data_path should point to a folder containing parquet files.
