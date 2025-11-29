@@ -12,8 +12,8 @@ sh scripts/setup.sh
 
 The script creates a conda environment named `vlm_env` and automatically detects your platform to install PyTorch with the appropriate backend:
 - **Mac M-series (Apple Silicon)**: PyTorch 2.9.0 with MPS support
-- **Linux aarch64**: PyTorch 2.9.0 with CUDA 12.8 support
-- **CUDA systems** (NVIDIA GPUs): PyTorch 2.9.0 with CUDA 12.8 support
+- **Linux aarch64**: PyTorch 2.9.0 with CUDA 12.8+ support
+- **CUDA systems** (NVIDIA GPUs): PyTorch 2.9.0 with CUDA 12.8+ support
 - **Other platforms**: PyTorch 2.9.0 CPU version
 
 Make sure you have [conda](https://docs.conda.io/en/latest/miniconda.html) or [miniconda](https://docs.conda.io/en/latest/miniconda.html) installed first.
@@ -52,12 +52,12 @@ python scripts/prepare_dataset.py
 ## Usage
 
 ```bash
-# Training (with conda run)
-conda run -n vlm_env python src/vlm/train/run.py --data_path ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder ~/dataset/llava-pretrain
+# Training Phase 1 (with conda run)
+conda run -n vlm_env python src/vlm/train/phase1_run.py --data_path ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder ~/dataset/llava-pretrain
 
-# Training (with activated environment)
+# Training Phase 1 (with activated environment)
 conda activate vlm_env
-python src/vlm/train/run.py --data_path ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder ~/dataset/llava-pretrain
+python src/vlm/train/phase1_run.py --data_path ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json --image_folder ~/dataset/llava-pretrain
 
 # Inference
 conda run -n vlm_env python src/vlm/inference/inference.py --checkpoint ~/models/llava/checkpoint_phase1.pt --image_path <path> --text "Describe this image"

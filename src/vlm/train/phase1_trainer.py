@@ -1,4 +1,4 @@
-"""Training logic for LLaVA."""
+"""Training logic for LLaVA Phase 1 (Pretraining)."""
 
 import os
 import math
@@ -31,8 +31,9 @@ class Phase1Trainer:
         wandb_run_name: Optional[str] = None,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
-        save_checkpoint_interval: int = 100,
+        save_checkpoint_interval: int = 500,
         use_fp16: bool = False,
+        gradient_accumulation_steps: int = 1,
     ):
         """Initialize Phase 1 Trainer.
 
@@ -55,6 +56,8 @@ class Phase1Trainer:
                 (default: 20 steps)
             use_fp16: Whether to use fp16/mixed precision training
                 (only enabled if CUDA is available)
+            gradient_accumulation_steps: Number of gradient accumulation steps
+                (default: 1, no accumulation)
         """
         self.model = model
         self.train_dataloader = train_dataloader
@@ -67,6 +70,7 @@ class Phase1Trainer:
         self.max_grad_norm = max_grad_norm
         self.use_wandb = use_wandb
         self.save_checkpoint_interval = save_checkpoint_interval
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
         # Auto-detect rank and world_size from environment or dist
         # (needed early for logging)
@@ -115,7 +119,7 @@ class Phase1Trainer:
             try:
                 import wandb
                 self.wandb = wandb
-                
+
                 # Build config with hyperparameters
                 wandb_config = {
                     "max_steps": max_steps,
@@ -123,6 +127,7 @@ class Phase1Trainer:
                     "max_grad_norm": max_grad_norm,
                     "device": str(device),
                     "output_dir": output_dir,
+                    "gradient_accumulation_steps": gradient_accumulation_steps,
                 }
 
                 # Add hyperparameters if provided
@@ -162,6 +167,7 @@ class Phase1Trainer:
 
         step = 0
         total_loss = 0
+        accumulation_step = 0
 
         # Only show progress bar on rank 0
         if self.rank == 0:
@@ -174,6 +180,7 @@ class Phase1Trainer:
 
         for _ in progress_bar:
             step += 1
+            accumulation_step += 1
 
             try:
                 batch = next(data_iter)
@@ -191,8 +198,9 @@ class Phase1Trainer:
             if batch.get('pixel_values') is not None:
                 pixel_values = batch['pixel_values'].to(self.device)
 
-            # Zero gradients
-            self.optimizer.zero_grad()
+            # Zero gradients only at the start of accumulation
+            if accumulation_step == 1:
+                self.optimizer.zero_grad()
 
             # Forward pass with mixed precision if enabled
             # For each user turn with images:
@@ -225,44 +233,57 @@ class Phase1Trainer:
                        f"{loss.item()}")
                 if self.rank == 0:
                     print(msg)
+                # Reset accumulation when skipping a batch
+                # to avoid partial accumulation
+                accumulation_step = 0
                 continue
+
+            # Scale loss by accumulation steps to get average gradient
+            loss = loss / self.gradient_accumulation_steps
 
             # Backward pass with gradient scaling if using fp16
             if self.use_fp16:
                 # Scale loss and backward pass
                 self.scaler.scale(loss).backward()
-
-                # Unscale gradients before clipping
-                self.scaler.unscale_(self.optimizer)
-
-                # Gradient clipping
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    max_norm=self.max_grad_norm
-                )
-
-                # Optimizer step with scaling
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
             else:
                 # Standard backward pass
                 loss.backward()
 
-                # Gradient clipping
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    max_norm=self.max_grad_norm
-                )
+            # Only update optimizer and scheduler after accumulating all steps
+            grad_norm = None
+            if accumulation_step == self.gradient_accumulation_steps:
+                if self.use_fp16:
+                    # Unscale gradients before clipping
+                    self.scaler.unscale_(self.optimizer)
 
-                # Optimizer step
-                self.optimizer.step()
+                    # Gradient clipping
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        max_norm=self.max_grad_norm
+                    )
 
-            # Learning rate scheduler step
-            if self.scheduler is not None:
-                self.scheduler.step()
+                    # Optimizer step with scaling
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Gradient clipping
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        max_norm=self.max_grad_norm
+                    )
 
-            # Update stats
-            loss_value = loss.item()
+                    # Optimizer step
+                    self.optimizer.step()
+
+                # Learning rate scheduler step
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
+                # Reset accumulation step counter
+                accumulation_step = 0
+
+            # Update stats (unscale loss for logging)
+            loss_value = loss.item() * self.gradient_accumulation_steps
             total_loss += loss_value
             avg_loss = total_loss / step
 
@@ -291,41 +312,53 @@ class Phase1Trainer:
                 pass
 
             # Only print logs on rank 0
+            # Only log grad_norm when we actually step (after accumulation)
             if self.rank == 0:
-                if not self.use_wandb:
+                if not self.use_wandb and step % 100 == 0:
+                    grad_norm_str = (
+                        f"{grad_norm:.4f}" if grad_norm is not None
+                        else "accumulating"
+                    )
                     print(
                         f"Step {step}: Loss: {loss_value:.4f}, "
                         f"Avg Loss: {avg_loss:.4f}, "
                         f"PPL: {perplexity:.2f}, "
-                        f"Grad Norm: {grad_norm:.4f}, "
+                        f"Grad Norm: {grad_norm_str}, "
                         f"LR: {current_lr:.2e}"
                     )
                 if hasattr(progress_bar, 'set_postfix'):
+                    grad_norm_str = (
+                        f"{grad_norm:.4f}" if grad_norm is not None
+                        else "accum"
+                    )
                     progress_bar.set_postfix({
                         "loss": f"{loss_value:.4f}",
                         "avg_loss": f"{avg_loss:.4f}",
                         "ppl": f"{perplexity:.2f}",
-                        "grad_norm": f"{grad_norm:.4f}",
+                        "grad_norm": grad_norm_str,
                         "lr": f"{current_lr:.2e}",
                     })
 
             # Log to wandb if enabled (only on rank 0)
+            # Only log grad_norm when we actually step (after accumulation)
             if (self.use_wandb and self.wandb is not None and
                     self.rank == 0):
-                grad_norm_val = (
-                    grad_norm.item()
-                    if isinstance(grad_norm, torch.Tensor)
-                    else grad_norm
-                )
-
                 log_dict = {
                     "train/loss": loss_value,
                     "train/avg_loss": avg_loss,
                     "train/perplexity": perplexity,
-                    "train/grad_norm": grad_norm_val,
                     "train/param_norm": param_norm,
                     "train/learning_rate": current_lr,
                 }
+
+                # Only log grad_norm when we actually computed it (after step)
+                if grad_norm is not None:
+                    grad_norm_val = (
+                        grad_norm.item()
+                        if isinstance(grad_norm, torch.Tensor)
+                        else grad_norm
+                    )
+                    log_dict["train/grad_norm"] = grad_norm_val
 
                 # Add GPU memory if available
                 if gpu_memory_mb is not None:
@@ -347,6 +380,36 @@ class Phase1Trainer:
                     )
                     print("Stopping training to prevent further issues.")
                 break
+
+        # Handle final optimizer step if we have accumulated gradients
+        # but haven't stepped yet
+        if accumulation_step > 0:
+            if self.use_fp16:
+                # Unscale gradients before clipping
+                self.scaler.unscale_(self.optimizer)
+
+                # Gradient clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.max_grad_norm
+                )
+
+                # Optimizer step with scaling
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                # Gradient clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.max_grad_norm
+                )
+
+                # Optimizer step
+                self.optimizer.step()
+
+            # Learning rate scheduler step
+            if self.scheduler is not None:
+                self.scheduler.step()
 
         # Final checkpoint save only on rank 0
         if self.rank == 0:
@@ -374,3 +437,4 @@ class Phase1Trainer:
                 str(checkpoint_path)
             )
             print(f"Saved checkpoint to {checkpoint_path}")
+

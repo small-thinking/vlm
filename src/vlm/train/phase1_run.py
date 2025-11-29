@@ -2,18 +2,19 @@
 """Training script for LLaVA Phase 1 (Pretraining).
 
 Single GPU/CPU training:
-python src/vlm/train/run.py --data_path \
+python src/vlm/train/phase1_run.py --data_path \
     ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
     --image_folder ~/dataset/llava-pretrain \
     --max_steps 10 --batch_size 8 --use_cosine_schedule \
     --use_wandb --output_dir ~/models/llava
 
 Distributed training (automatically enabled when using torchrun):
-torchrun --nproc_per_node=2 src/vlm/train/run.py --data_path \
+torchrun --nproc_per_node=2 src/vlm/train/phase1_run.py --data_path \
     ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
     --image_folder ~/dataset/llava-pretrain \
-    --max_steps 10 --batch_size 8 --use_cosine_schedule \
-    --use_wandb --output_dir ~/models/llava --learning_rate 2e-3
+    --max_steps 10000 --batch_size 64 --use_cosine_schedule \
+    --gradient_accumulation_steps 4 --use_fp16 \
+    --output_dir ~/models/llava --learning_rate 2e-3
 """
 
 import argparse
@@ -30,7 +31,7 @@ from torch.utils.data import DataLoader
 from vlm.configs.data_config import DataConfig
 from vlm.configs.model_config import LLaVAConfig
 from vlm.models.llava import LLaVAModel
-from vlm.train.trainer import Phase1Trainer
+from vlm.train.phase1_trainer import Phase1Trainer
 
 
 def get_cosine_schedule_with_warmup(
@@ -293,6 +294,20 @@ def train(args):
     if rank == 0 and use_fp16:
         print("✅ FP16/Mixed precision training will be enabled")
 
+    # Calculate effective batch size with gradient accumulation
+    effective_batch_size = (
+        args.batch_size * world_size * args.gradient_accumulation_steps
+        if ddp_enabled
+        else args.batch_size * args.gradient_accumulation_steps
+    )
+
+    if rank == 0 and args.gradient_accumulation_steps > 1:
+        print(
+            f"✅ Gradient accumulation enabled: "
+            f"{args.gradient_accumulation_steps} steps "
+            f"(effective batch size: {effective_batch_size})"
+        )
+
     trainer = Phase1Trainer(
         model=model_for_optimizer,  # Pass DDP model if enabled
         train_dataloader=dataloader,
@@ -305,14 +320,12 @@ def train(args):
         wandb_run_name=args.wandb_run_name,
         scheduler=scheduler,
         use_fp16=use_fp16,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         hyperparams={
             "learning_rate": args.learning_rate,
             "batch_size": args.batch_size,
-            "effective_batch_size": (
-                args.batch_size * world_size
-                if ddp_enabled
-                else args.batch_size
-            ),
+            "effective_batch_size": effective_batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "max_length": args.max_length,
             "num_workers": args.num_workers,
             "use_cosine_schedule": args.use_cosine_schedule,
@@ -412,6 +425,17 @@ if __name__ == "__main__":
         "--use_fp16",
         action="store_true",
         help="Enable fp16/mixed precision training (requires CUDA)"
+    )
+
+    # Gradient accumulation args
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help=(
+            "Number of gradient accumulation steps "
+            "(default: 1, no accumulation)"
+        )
     )
 
     args = parser.parse_args()
