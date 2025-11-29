@@ -1,5 +1,9 @@
 """Data loading and processing module."""
-from vlm.configs.data_config import DataConfig
+from vlm.configs.data_config import (
+    DataConfig,
+    Phase1DataConfig,
+    Phase2DataConfig,
+)
 from vlm.data.llava_pretrain_dataset import (
     LLaVAPretrainDataset,
     build_pretrain_dataloader,
@@ -13,6 +17,8 @@ from vlm.data.llava_instruct_dataset import (
 
 __all__ = [
     "DataConfig",
+    "Phase1DataConfig",
+    "Phase2DataConfig",
     "LLaVAPretrainDataset",
     "build_pretrain_dataloader",
     "pretrain_collate_fn",

@@ -1,6 +1,10 @@
 """VLM Configuration module."""
 
-from vlm.configs.data_config import DataConfig
+from vlm.configs.data_config import (
+    DataConfig,
+    Phase1DataConfig,
+    Phase2DataConfig,
+)
 from vlm.configs.model_config import (
     ConnectorConfig,
     LanguageModelConfig,
@@ -13,5 +17,7 @@ __all__ = [
     "DataConfig",
     "LanguageModelConfig",
     "LLaVAConfig",
+    "Phase1DataConfig",
+    "Phase2DataConfig",
     "VisionEncoderConfig",
 ]

@@ -18,7 +18,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from transformers import CLIPImageProcessor
 
-from vlm.configs.data_config import DataConfig
+from vlm.configs.data_config import Phase1DataConfig
 
 
 class LLaVAPretrainDataset(Dataset):
@@ -293,14 +293,14 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def build_pretrain_dataloader(
-    config: DataConfig,
+    config: Phase1DataConfig,
     tokenizer: Any,
     image_processor: CLIPImageProcessor,
 ) -> DataLoader:
     """Build DataLoader for LLaVA pretraining.
     
     Args:
-        config: Data configuration
+        config: Phase 1 data configuration (image_folder is required)
         tokenizer: Tokenizer for language model
         image_processor: Image processor for vision encoder
         
