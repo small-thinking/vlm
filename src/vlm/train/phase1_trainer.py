@@ -31,7 +31,7 @@ class Phase1Trainer:
         wandb_run_name: Optional[str] = None,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
-        save_checkpoint_interval: int = 100,
+        save_checkpoint_interval: int = 500,
         use_fp16: bool = False,
         gradient_accumulation_steps: int = 1,
     ):
@@ -250,6 +250,7 @@ class Phase1Trainer:
                 loss.backward()
 
             # Only update optimizer and scheduler after accumulating all steps
+            grad_norm = None
             if accumulation_step == self.gradient_accumulation_steps:
                 if self.use_fp16:
                     # Unscale gradients before clipping
@@ -280,14 +281,6 @@ class Phase1Trainer:
 
                 # Reset accumulation step counter
                 accumulation_step = 0
-            else:
-                # For logging purposes, compute grad_norm even if not stepping
-                # This is approximate since gradients are still accumulating
-                with torch.no_grad():
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=float('inf')
-                    )
 
             # Update stats (unscale loss for logging)
             loss_value = loss.item() * self.gradient_accumulation_steps
@@ -319,41 +312,53 @@ class Phase1Trainer:
                 pass
 
             # Only print logs on rank 0
+            # Only log grad_norm when we actually step (after accumulation)
             if self.rank == 0:
                 if not self.use_wandb and step % 100 == 0:
+                    grad_norm_str = (
+                        f"{grad_norm:.4f}" if grad_norm is not None
+                        else "accumulating"
+                    )
                     print(
                         f"Step {step}: Loss: {loss_value:.4f}, "
                         f"Avg Loss: {avg_loss:.4f}, "
                         f"PPL: {perplexity:.2f}, "
-                        f"Grad Norm: {grad_norm:.4f}, "
+                        f"Grad Norm: {grad_norm_str}, "
                         f"LR: {current_lr:.2e}"
                     )
                 if hasattr(progress_bar, 'set_postfix'):
+                    grad_norm_str = (
+                        f"{grad_norm:.4f}" if grad_norm is not None
+                        else "accum"
+                    )
                     progress_bar.set_postfix({
                         "loss": f"{loss_value:.4f}",
                         "avg_loss": f"{avg_loss:.4f}",
                         "ppl": f"{perplexity:.2f}",
-                        "grad_norm": f"{grad_norm:.4f}",
+                        "grad_norm": grad_norm_str,
                         "lr": f"{current_lr:.2e}",
                     })
 
             # Log to wandb if enabled (only on rank 0)
+            # Only log grad_norm when we actually step (after accumulation)
             if (self.use_wandb and self.wandb is not None and
                     self.rank == 0):
-                grad_norm_val = (
-                    grad_norm.item()
-                    if isinstance(grad_norm, torch.Tensor)
-                    else grad_norm
-                )
-
                 log_dict = {
                     "train/loss": loss_value,
                     "train/avg_loss": avg_loss,
                     "train/perplexity": perplexity,
-                    "train/grad_norm": grad_norm_val,
                     "train/param_norm": param_norm,
                     "train/learning_rate": current_lr,
                 }
+
+                # Only log grad_norm when we actually computed it (after step)
+                if grad_norm is not None:
+                    grad_norm_val = (
+                        grad_norm.item()
+                        if isinstance(grad_norm, torch.Tensor)
+                        else grad_norm
+                    )
+                    log_dict["train/grad_norm"] = grad_norm_val
 
                 # Add GPU memory if available
                 if gpu_memory_mb is not None:
