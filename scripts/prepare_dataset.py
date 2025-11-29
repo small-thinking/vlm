@@ -2,16 +2,14 @@
 Download and prepare LLaVA datasets for Phase 1 and Phase 2 training.
 
 Phase 1: LLaVA-Pretrain dataset (vision-language alignment)
-Phase 2: LLaVA-Instruct-Mix-VSFT dataset (instruction following)
+Phase 2: LLaVA-Instruct-Mix dataset (instruction following)
 
 Example usage:
     # Phase 1
-    python scripts/prepare_dataset.py --phase 1 \\
-        --dataset-dir /workspace/dataset/llava-pretrain
+    python scripts/prepare_dataset.py --phase 1 --dataset-dir ~/dataset/llava-pretrain
 
     # Phase 2
-    python scripts/prepare_dataset.py --phase 2 \\
-        --dataset-dir /workspace/dataset/llava-instruct-mix-vsft
+    python scripts/prepare_dataset.py --phase 2 --dataset-dir ~/dataset/llava-instruct-mix
 """
 
 import os
@@ -21,6 +19,7 @@ import time
 import argparse
 import subprocess
 import shutil
+import json
 from pathlib import Path
 import random
 
@@ -217,32 +216,51 @@ def verify_phase2_dataset(dataset_dir):
 
         for idx in indices:
             sample = dataset[idx]
-            # Check that messages and images exist
-            if 'messages' not in sample:
-                msg = f"❌ Error: 'messages' field not found in sample {idx}"
+            # Check that conversations and image exist
+            # theblackcat102/llava-instruct-mix uses
+            # 'conversations' and 'image'
+            if 'conversations' not in sample:
+                msg = (
+                    f"❌ Error: 'conversations' field not found "
+                    f"in sample {idx}"
+                )
                 print(msg)
                 return False
-            if 'images' not in sample:
-                msg = f"❌ Error: 'images' field not found in sample {idx}"
-                print(msg)
-                return False
-
-            # Verify messages is a list
-            messages = sample['messages']
-            if not isinstance(messages, list):
-                msg = f"❌ Error: 'messages' is not a list in sample {idx}"
-                print(msg)
-                return False
-
-            # Verify images is a list
-            images = sample['images']
-            if not isinstance(images, list):
-                msg = f"❌ Error: 'images' is not a list in sample {idx}"
+            if 'image' not in sample:
+                msg = (
+                    f"❌ Error: 'image' field not found in sample {idx}"
+                )
                 print(msg)
                 return False
 
-            print(f"  Sample {idx}: {len(messages)} messages, "
-                  f"{len(images)} images")
+            # Verify conversations is a list or string (JSON string)
+            conversations = sample['conversations']
+            if isinstance(conversations, str):
+                # If it's a JSON string, try to parse it
+                try:
+                    conversations = json.loads(conversations)
+                except json.JSONDecodeError:
+                    msg = (
+                        f"❌ Error: 'conversations' is not valid JSON "
+                        f"in sample {idx}"
+                    )
+                    print(msg)
+                    return False
+
+            if not isinstance(conversations, list):
+                msg = (
+                    f"❌ Error: 'conversations' is not a list "
+                    f"in sample {idx}"
+                )
+                print(msg)
+                return False
+
+            # Verify image exists (can be PIL Image, bytes, or path)
+            image = sample['image']
+            has_image = image is not None
+
+            print(f"  Sample {idx}: {len(conversations)} conversation turns, "
+                  f"has_image={has_image}")
 
         print("✅ Verification complete: Random samples loaded successfully.")
         return True
@@ -292,12 +310,12 @@ def prepare_phase1_dataset(
 
 
 def prepare_phase2_dataset(dataset_dir, skip_download, skip_verify):
-    """Prepare Phase 2 dataset (LLaVA-Instruct-Mix-VSFT)."""
+    """Prepare Phase 2 dataset (LLaVA-Instruct-Mix)."""
     print("=" * 60)
-    print("Phase 2: LLaVA-Instruct-Mix-VSFT Dataset Preparation")
+    print("Phase 2: LLaVA-Instruct-Mix Dataset Preparation")
     print("=" * 60)
 
-    repo_id = "HuggingFaceH4/llava-instruct-mix-vsft"
+    repo_id = "theblackcat102/llava-instruct-mix"
 
     if not skip_download:
         # Check if dataset already exists
@@ -308,33 +326,47 @@ def prepare_phase2_dataset(dataset_dir, skip_download, skip_verify):
         else:
             print(f"📦 Downloading {repo_id} to {dataset_dir}...")
 
-            # Try using datasets library first (preferred)
-            try:
-                from datasets import load_dataset
-                print("Using 'datasets' library to download...")
+            # Use hf CLI to preserve original parquet partition structure
+            # This maintains the original file names like
+            # train-00000-of-00093-*.parquet
+            if not download_dataset(repo_id, str(dataset_dir)):
+                print("❌ Download failed with hf CLI.")
+                print("   Make sure 'hf' command is available:")
+                print("   pip install huggingface-cli")
+                print("   huggingface-cli login")
 
-                os.makedirs(dataset_dir, exist_ok=True)
+                # Fallback: try datasets library with sharding
+                try:
+                    from datasets import load_dataset
+                    print("⚠️  Trying 'datasets' library as fallback...")
+                    print(
+                        "   Note: This will create new partition files, "
+                        "not preserve original names"
+                    )
 
-                # Download dataset
-                dataset = load_dataset(repo_id, split="train")
+                    os.makedirs(dataset_dir, exist_ok=True)
 
-                # Save as parquet
-                parquet_path = dataset_dir / "train.parquet"
-                dataset.to_parquet(str(parquet_path))
+                    # Download dataset
+                    dataset = load_dataset(repo_id, split="train")
 
-                print(f"✅ Dataset downloaded and saved to {parquet_path}")
+                    # Save as parquet with sharding to preserve partitioned
+                    # format. Use max_shard_size to create multiple files
+                    dataset.to_parquet(
+                        str(dataset_dir),
+                        max_shard_size="500MB"
+                    )
 
-            except ImportError:
-                print("⚠️  'datasets' library not found. Trying hf CLI...")
-                # Fallback to hf CLI
-                if not download_dataset(repo_id, str(dataset_dir)):
-                    print("❌ Download failed. Please install datasets:")
-                    print("   pip install datasets")
+                    print(
+                        f"✅ Dataset downloaded and saved to {dataset_dir}"
+                    )
+                    print("   Created partitioned parquet files")
+
+                except ImportError:
+                    print("❌ 'datasets' library not found.")
+                    print("   Install with: pip install datasets")
                     sys.exit(1)
-            except Exception as e:
-                print(f"❌ Download failed with datasets library: {e}")
-                print("Trying hf CLI as fallback...")
-                if not download_dataset(repo_id, str(dataset_dir)):
+                except Exception as e:
+                    print(f"❌ Download failed: {e}")
                     sys.exit(1)
 
     if not skip_verify:
@@ -355,7 +387,7 @@ Examples:
 
   # Phase 2 (LLaVA-Instruct-Mix-VSFT)
   python scripts/prepare_dataset.py --phase 2 \\
-      --dataset-dir /workspace/dataset/llava-instruct-mix-vsft
+      --dataset-dir /workspace/dataset/llava-instruct-mix
         """
     )
     parser.add_argument(
@@ -387,7 +419,7 @@ Examples:
         help=(
             "Root directory for the dataset. "
             "Defaults to ~/dataset/llava-pretrain (phase 1) or "
-            "~/dataset/llava-instruct-mix-vsft (phase 2) if not specified."
+            "~/dataset/llava-instruct-mix (phase 2) if not specified."
         )
     )
     args = parser.parse_args()
@@ -399,7 +431,7 @@ Examples:
         if args.phase == 1:
             dataset_dir = Path.home() / "dataset" / "llava-pretrain"
         else:
-            dataset_dir = Path.home() / "dataset" / "llava-instruct-mix-vsft"
+            dataset_dir = Path.home() / "dataset" / "llava-instruct-mix"
 
     # Ensure directory exists
     os.makedirs(dataset_dir, exist_ok=True)
