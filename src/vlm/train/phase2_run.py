@@ -4,7 +4,7 @@
 Single GPU/CPU training:
 python src/vlm/train/phase2_run.py \
     --checkpoint ~/models/llava/checkpoint_phase1.pt \
-    --data_path ~/dataset/llava-instruct-mix \
+    --data_path ~/dataset/llava-instruct-mix/data \
     --max_steps 10 --batch_size 2 --use_cosine_schedule \
     --use_wandb --output_dir ~/models/llava
 
