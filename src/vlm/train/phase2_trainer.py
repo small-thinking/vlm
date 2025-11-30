@@ -32,7 +32,7 @@ class Phase2Trainer:
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
         save_checkpoint_interval: int = 500,
-        use_fp16: bool = False,
+        precision: str = "fp16",
         gradient_accumulation_steps: int = 1,
     ):
         """Initialize Phase 2 Trainer.
@@ -54,8 +54,8 @@ class Phase2Trainer:
                 (e.g., learning_rate, batch_size)
             save_checkpoint_interval: Interval for saving checkpoints
                 (default: 500 steps)
-            use_fp16: Whether to use fp16/mixed precision training
-                (only enabled if CUDA is available)
+            precision: Mixed precision mode: "bf16", "fp8", or "fp32"
+                (default: "bf16")
             gradient_accumulation_steps: Number of gradient accumulation steps
                 (default: 1, no accumulation)
         """
@@ -71,6 +71,7 @@ class Phase2Trainer:
         self.use_wandb = use_wandb
         self.save_checkpoint_interval = save_checkpoint_interval
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.precision = precision
 
         # Auto-detect rank and world_size from environment or dist
         # (needed early for logging)
@@ -89,21 +90,124 @@ class Phase2Trainer:
             type(model).__name__ == 'DistributedDataParallel'
         )
 
-        # Setup fp16/mixed precision training
-        self.use_fp16 = use_fp16 and torch.cuda.is_available()
+        # Setup mixed precision training (fp16, bf16, fp8, or fp32)
+        self.accelerator = None
         self.scaler = None
-        if self.use_fp16:
-            self.scaler = torch.cuda.amp.GradScaler()
+        self.amp_dtype = None
+        self.device_type = "cuda" if device.type == "cuda" else device.type
+        
+        if precision == "fp8":
+            # Use accelerate for fp8 (requires Transformer Engine or MS-AMP)
+            if not torch.cuda.is_available():
+                if self.rank == 0:
+                    print(
+                        "⚠️  FP8 requires CUDA. Falling back to bf16."
+                    )
+                precision = "bf16"
+            else:
+                try:
+                    from accelerate import Accelerator
+                    self.accelerator = Accelerator(mixed_precision="fp8")
+                    if self.rank == 0:
+                        print("✅ FP8 training enabled (using accelerate)")
+                    # Prepare model, optimizer, and dataloader with accelerate
+                    # Note: When using accelerate, it handles DDP internally
+                    # so don't pre-wrap with DDP in the run script
+                    self.model = self.accelerator.prepare(self.model)
+                    self.optimizer = self.accelerator.prepare(self.optimizer)
+                    self.train_dataloader = (
+                        self.accelerator.prepare(self.train_dataloader)
+                    )
+                    # Update underlying_model after accelerate preparation
+                    if hasattr(self.model, 'module'):
+                        self.underlying_model = self.model.module
+                    else:
+                        self.underlying_model = self.model
+                except (ImportError, RuntimeError) as e:
+                    if self.rank == 0:
+                        print(
+                            f"⚠️  FP8 not available ({e}). "
+                            "Falling back to bf16."
+                        )
+                    precision = "bf16"
+        elif precision == "fp16":
+            # FP16 support: CUDA (with gradient scaling) or MPS/CPU (limited)
+            if device.type == "cuda":
+                self.amp_dtype = torch.float16
+                # FP16 on CUDA requires gradient scaling
+                self.scaler = torch.cuda.amp.GradScaler()
+                if self.rank == 0:
+                    print(
+                        "✅ FP16/Mixed precision training enabled "
+                        "(using autocast with float16, CUDA)"
+                    )
+            elif device.type == "mps":
+                # MPS supports fp16 but may not be optimal
+                self.amp_dtype = torch.float16
+                self.scaler = None  # MPS doesn't need gradient scaling
+                if self.rank == 0:
+                    print(
+                        "✅ FP16/Mixed precision training enabled "
+                        "(using autocast with float16, MPS)"
+                    )
+            else:
+                # CPU - fp16 not recommended but can work
+                if self.rank == 0:
+                    print(
+                        "⚠️  FP16 on CPU is not recommended. "
+                        "Using fp32."
+                    )
+                self.amp_dtype = None
+                self.scaler = None
+        elif precision == "bf16":
+            # BF16 support: CUDA (with bf16 support) or MPS
+            if device.type == "cuda" and torch.cuda.is_bf16_supported():
+                self.amp_dtype = torch.bfloat16
+                self.scaler = None
+                if self.rank == 0:
+                    print(
+                        "✅ BF16/Mixed precision training enabled "
+                        "(using autocast with bfloat16, CUDA)"
+                    )
+            elif device.type == "mps":
+                # MPS natively supports bf16
+                self.amp_dtype = torch.bfloat16
+                self.scaler = None
+                if self.rank == 0:
+                    print(
+                        "✅ BF16/Mixed precision training enabled "
+                        "(using autocast with bfloat16, MPS)"
+                    )
+            else:
+                if self.rank == 0:
+                    if device.type == "cpu":
+                        print(
+                            "⚠️  BF16 on CPU is not recommended. Using fp32."
+                        )
+                    else:
+                        print(
+                            "⚠️  BF16 not supported on this device. "
+                            "Using fp32."
+                        )
+                self.amp_dtype = None
+                self.scaler = None
+        elif precision == "fp32":
+            self.amp_dtype = None
+            self.scaler = None
             if self.rank == 0:
-                print(
-                    "✅ FP16/Mixed precision training enabled (using autocast)"
-                )
-
-        # Get underlying model if wrapped with DDP
-        if self.ddp_enabled:
-            self.underlying_model = model.module
+                print("Using fp32 precision")
         else:
-            self.underlying_model = model
+            raise ValueError(
+                f"Invalid precision: {precision}. "
+                "Must be 'fp16', 'bf16', 'fp8', or 'fp32'"
+            )
+
+        # Get underlying model if wrapped with DDP (only if not using accelerate)
+        if self.accelerator is None:
+            if self.ddp_enabled:
+                self.underlying_model = model.module
+            else:
+                self.underlying_model = model
 
         # Phase 2: Freeze Vision Encoder, Train Connector + LLM
         # Set training stage on underlying model
@@ -141,8 +245,11 @@ class Phase2Trainer:
                     if optimizer_lr is not None:
                         wandb_config["learning_rate"] = optimizer_lr
 
-                # Add fp16 status
-                wandb_config["use_fp16"] = self.use_fp16
+                # Add precision status
+                wandb_config["precision"] = self.precision
+                wandb_config["amp_dtype"] = (
+                    str(self.amp_dtype) if self.amp_dtype else "fp32"
+                )
 
                 wandb.init(
                     project=wandb_project or "llava-instruct",
@@ -209,17 +316,52 @@ class Phase2Trainer:
             # 2. pixel_values → CLIP encoder → visual features
             # 3. visual features → connector → visual embeddings
             # 4. visual embeddings concatenated with text embeddings
-            if self.use_fp16:
-                # Use autocast for mixed precision training
-                with torch.cuda.amp.autocast():
-                    outputs = self.model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        labels=labels,
-                        images=pixel_values
-                    )
-                    loss = outputs.loss
+            if self.accelerator is not None:
+                # FP8 training with accelerate
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    images=pixel_values
+                )
+                loss = outputs.loss
+            elif self.amp_dtype is not None:
+                # Mixed precision training with autocast (fp16 or bf16)
+                # Use device-appropriate autocast
+                if self.device_type == "cuda":
+                    with torch.cuda.amp.autocast(dtype=self.amp_dtype):
+                        outputs = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                            images=pixel_values
+                        )
+                        loss = outputs.loss
+                elif self.device_type == "mps":
+                    with torch.amp.autocast(
+                        device_type="mps", dtype=self.amp_dtype
+                    ):
+                        outputs = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                            images=pixel_values
+                        )
+                        loss = outputs.loss
+                else:
+                    # CPU or other - use generic autocast
+                    with torch.amp.autocast(
+                        device_type="cpu", dtype=self.amp_dtype
+                    ):
+                        outputs = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                            images=pixel_values
+                        )
+                        loss = outputs.loss
             else:
+                # FP32 training
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -242,37 +384,46 @@ class Phase2Trainer:
             # Scale loss by accumulation steps to get average gradient
             loss = loss / self.gradient_accumulation_steps
 
-            # Backward pass with gradient scaling if using fp16
-            if self.use_fp16:
-                # Scale loss and backward pass
+            # Backward pass
+            if self.accelerator is not None:
+                # FP8 training with accelerate
+                self.accelerator.backward(loss)
+            elif self.scaler is not None:
+                # FP16 on CUDA requires gradient scaling
                 self.scaler.scale(loss).backward()
             else:
-                # Standard backward pass
+                # Standard backward pass (bf16, fp16 on MPS, or fp32)
                 loss.backward()
 
             # Only update optimizer and scheduler after accumulating all steps
             grad_norm = None
             if accumulation_step == self.gradient_accumulation_steps:
-                if self.use_fp16:
-                    # Unscale gradients before clipping
-                    self.scaler.unscale_(self.optimizer)
-
+                if self.accelerator is not None:
+                    # FP8 training with accelerate
                     # Gradient clipping
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(),
                         max_norm=self.max_grad_norm
                     )
-
+                    # Optimizer step with accelerate
+                    self.accelerator.step(self.optimizer)
+                elif self.scaler is not None:
+                    # FP16 on CUDA - unscale before clipping
+                    self.scaler.unscale_(self.optimizer)
+                    # Gradient clipping
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        max_norm=self.max_grad_norm
+                    )
                     # Optimizer step with scaling
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    # Gradient clipping
+                    # Gradient clipping (bf16, fp16 on MPS, or fp32)
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(),
                         max_norm=self.max_grad_norm
                     )
-
                     # Optimizer step
                     self.optimizer.step()
 
@@ -369,7 +520,8 @@ class Phase2Trainer:
 
             # Save checkpoint only on rank 0
             if step % self.save_checkpoint_interval == 0 and self.rank == 0:
-                self.save_checkpoint("checkpoint_phase2.pt")
+                filename = f"checkpoint_phase2_{self.precision}.pt"
+                self.save_checkpoint(filename)
 
             # Early stopping if loss explodes
             if (loss_value > 100.0 or math.isnan(loss_value) or
@@ -385,26 +537,28 @@ class Phase2Trainer:
         # Handle final optimizer step if we have accumulated gradients
         # but haven't stepped yet
         if accumulation_step > 0:
-            if self.use_fp16:
-                # Unscale gradients before clipping
-                self.scaler.unscale_(self.optimizer)
-
-                # Gradient clipping
+            if self.accelerator is not None:
+                # FP8 training with accelerate
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=self.max_grad_norm
                 )
-
-                # Optimizer step with scaling
+                self.accelerator.step(self.optimizer)
+            elif self.scaler is not None:
+                # FP16 on CUDA - unscale before clipping
+                self.scaler.unscale_(self.optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.max_grad_norm
+                )
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                # Gradient clipping
+                # Gradient clipping (bf16, fp16 on MPS, or fp32)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=self.max_grad_norm
                 )
-
                 # Optimizer step
                 self.optimizer.step()
 
@@ -414,7 +568,8 @@ class Phase2Trainer:
 
         # Final checkpoint save only on rank 0
         if self.rank == 0:
-            self.save_checkpoint("checkpoint_phase2.pt")
+            filename = f"checkpoint_phase2_{self.precision}.pt"
+            self.save_checkpoint(filename)
             print("Training completed.")
 
         # Finish wandb run if enabled (only on rank 0)
@@ -422,7 +577,7 @@ class Phase2Trainer:
             self.wandb.finish()
 
     def save_checkpoint(self, filename: str):
-        """Save model checkpoint.
+        """Save model checkpoint with the corresponding precision.
 
         Args:
             filename: Name of the checkpoint file
@@ -432,10 +587,22 @@ class Phase2Trainer:
             output_dir = Path(self.output_dir).expanduser()
             os.makedirs(output_dir, exist_ok=True)
             checkpoint_path = output_dir / filename
-            # Save underlying model state (unwrap DDP if needed)
-            torch.save(
-                self.underlying_model.state_dict(),
-                str(checkpoint_path)
+            
+            # Get state dict and convert to training precision if needed
+            # (autocast doesn't change parameter dtype, so we convert on save)
+            state_dict = self.underlying_model.state_dict()
+            if self.amp_dtype is not None:
+                # Convert state dict parameters to training precision dtype
+                state_dict = {
+                    k: v.to(dtype=self.amp_dtype) if v.is_floating_point()
+                    else v
+                    for k, v in state_dict.items()
+                }
+            
+            # Save state dict with correct precision
+            torch.save(state_dict, str(checkpoint_path))
+            print(
+                f"Saved checkpoint to {checkpoint_path} "
+                f"(precision: {self.precision})"
             )
-            print(f"Saved checkpoint to {checkpoint_path}")
 

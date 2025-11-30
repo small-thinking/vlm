@@ -46,7 +46,11 @@ class LanguageModel(ABC, nn.Module):
 class Qwen2_5LM(LanguageModel):
     """Qwen 2.5 language model wrapper."""
     
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-1.5B", freeze: bool = False):
+    def __init__(
+        self,
+        model_name: str = "Qwen/Qwen2.5-1.5B",
+        freeze: bool = False
+    ):
         """
         Initialize Qwen 2.5 language model.
         
@@ -55,7 +59,20 @@ class Qwen2_5LM(LanguageModel):
             freeze: Whether to freeze the model weights
         """
         super().__init__()
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        # Default to bf16 if CUDA is available
+        # (Qwen models recommend bf16 for better numerical stability)
+        if torch.cuda.is_available():
+            if torch.cuda.is_bf16_supported():
+                torch_dtype = torch.bfloat16
+            else:
+                # Fall back to fp32 if bf16 not supported
+                torch_dtype = torch.float32
+        else:
+            torch_dtype = torch.float32
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         
         if freeze:
