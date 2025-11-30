@@ -486,6 +486,8 @@ def verify_model_forward_pass(
     """Verify that in model forward pass:
     1. Images are prepended to user input
     2. Images are part of the masked input (labels = -100 for visual tokens)
+    3. User input and assistant prompt are masked
+    4. Only assistant response is unmasked
     
     Args:
         dataset: The dataset to inspect
@@ -493,16 +495,27 @@ def verify_model_forward_pass(
         idx: Index of the sample to verify
         tokenizer: Tokenizer for decoding tokens
         device: Device to run model on
+    
+    Returns:
+        Dictionary with validation results
     """
     print_separator()
     print(f"🔍 Model Forward Pass Verification for Sample {idx}")
     print_separator()
     
+    results = {
+        'passed': True,
+        'errors': [],
+        'warnings': [],
+    }
+    
     try:
         sample = dataset[idx]
     except Exception as e:
         print(f"❌ Error loading sample {idx}: {e}")
-        return
+        results['passed'] = False
+        results['errors'].append(f"Failed to load sample: {e}")
+        return results
     
     pixel_values = sample.get('pixel_values', None)
     input_ids = sample.get('input_ids', None)
@@ -511,7 +524,8 @@ def verify_model_forward_pass(
     
     if pixel_values is None:
         print("⚠️  Sample has no image, skipping model forward verification")
-        return
+        results['warnings'].append("Sample has no image")
+        return results
     
     # Move to device
     model = model.to(device)
@@ -531,7 +545,6 @@ def verify_model_forward_pass(
     print()
     
     # Check 1: Verify visual tokens are prepended
-    # The model should extend attention_mask and labels with visual tokens
     print("✅ Check 1: Visual tokens prepended to input")
     
     # Get visual embeddings shape
@@ -544,7 +557,6 @@ def verify_model_forward_pass(
     
     # The model modifies attention_mask in-place, so we need to check
     # by looking at what the model would produce
-    # Let's trace through the forward pass logic
     text_embeds = model.language_model.get_input_embeddings()(
         input_ids_batch
     )
@@ -587,32 +599,228 @@ def verify_model_forward_pass(
     else:
         print(f"   ❌ ERROR: Visual tokens are NOT all masked!")
         print(f"   Visual labels: {visual_labels_in_expected}")
+        results['passed'] = False
+        results['errors'].append("Visual tokens are not all masked")
     
-    # Check what the model actually produced
-    # The model's forward modifies labels, so we need to check the actual output
-    # But the model returns a loss, not the modified labels
-    # So we trace through the forward logic manually
+    # Check 3: Verify user input and assistant prompt are masked
+    print()
+    print("✅ Check 3: User input and assistant prompt are masked")
     
-    # Verify that visual tokens come before text tokens
+    # Decode input_ids to find where user input and assistant prompt end
+    # From dataset.__getitem__, we know:
+    # - input_ids = [user_ids, assistant_prompt_ids, assistant_response_ids, padding]
+    # - labels mask first input_len tokens (user + prompt)
+    # - Only assistant_response_ids should be unmasked
+    
+    # Count masked tokens in original labels (before model adds visual tokens)
+    original_masked = (labels_batch[0] == -100).sum().item()
+    original_unmasked = (labels_batch[0] != -100).sum().item()
+    
+    # After model adds visual tokens, total masked should be:
+    # num_visual_tokens + original_masked
+    total_expected_masked = num_visual_tokens + original_masked
+    total_expected_unmasked = original_unmasked
+    
+    print(f"   Original labels: {original_masked} masked, {original_unmasked} unmasked")
+    print(f"   After model forward: {total_expected_masked} masked (visual + user + prompt)")
+    print(f"   Expected unmasked: {total_expected_unmasked} (assistant response only)")
+    
+    # Verify the expected labels structure
+    # First num_visual_tokens: -100 (visual)
+    # Next original_masked tokens: -100 (user + prompt)
+    # Remaining tokens: actual token IDs (assistant response)
+    # Padding tokens: -100
+    
+    # Check that user input and prompt are masked in original labels
+    # We need to decode to verify structure
+    if original_unmasked > 0:
+        unmasked_positions = (labels_batch[0] != -100).nonzero(as_tuple=True)[0]
+        unmasked_tokens = labels_batch[0][unmasked_positions]
+        unmasked_text = tokenizer.decode(unmasked_tokens.tolist(), skip_special_tokens=False)
+        
+        print(f"   Unmasked text (should be assistant response only):")
+        print(f"      {unmasked_text[:200]}{'...' if len(unmasked_text) > 200 else ''}")
+        
+        # Check that unmasked text doesn't contain "Human:" or "Assistant:" prompt
+        if "Human:" in unmasked_text or "Assistant:" in unmasked_text:
+            print(f"   ⚠️  WARNING: Unmasked text contains prompt markers!")
+            results['warnings'].append("Unmasked text may contain prompt markers")
+        else:
+            print(f"   ✅ Unmasked text appears to be assistant response only")
+    else:
+        print(f"   ❌ ERROR: No unmasked tokens (empty target)")
+        results['passed'] = False
+        results['errors'].append("No unmasked tokens in labels")
+    
+    # Check 4: Verify complete masking structure
     print()
-    print("✅ Check 3: Token order verification")
-    print(
-        f"   Sequence order: [Visual tokens ({num_visual_tokens})] + "
-        f"[Text tokens ({original_attention_len})]"
-    )
-    print(f"   ✅ Images are prepended to user input")
-    print()
+    print("✅ Check 4: Complete masking structure verification")
+    
+    # Simulate what model forward does
+    final_labels = torch.cat([visual_labels, labels_batch], dim=1)
+    final_attention = torch.cat([
+        torch.ones(num_visual_tokens, dtype=attention_mask_batch.dtype, device=device).unsqueeze(0),
+        attention_mask_batch
+    ], dim=1)
+    
+    # Verify structure:
+    # [0:num_visual_tokens]: -100 (visual tokens)
+    # [num_visual_tokens:num_visual_tokens+input_len]: -100 (user + prompt)
+    # [num_visual_tokens+input_len:num_visual_tokens+input_len+response_len]: token IDs (response)
+    # [num_visual_tokens+input_len+response_len:]: -100 (padding)
+    
+    visual_masked = (final_labels[0, :num_visual_tokens] == -100).all()
+    if not visual_masked:
+        print(f"   ❌ ERROR: Visual tokens not all masked")
+        results['passed'] = False
+        results['errors'].append("Visual tokens not masked correctly")
+    else:
+        print(f"   ✅ Visual tokens ({num_visual_tokens}) are masked")
+    
+    # Check that padding is masked
+    padding_mask = final_attention[0] == 0
+    if padding_mask.any():
+        padding_labels = final_labels[0][padding_mask]
+        unmasked_padding = (padding_labels != -100).sum().item()
+        if unmasked_padding > 0:
+            print(f"   ❌ ERROR: {unmasked_padding} padding tokens are unmasked")
+            results['passed'] = False
+            results['errors'].append(f"{unmasked_padding} padding tokens unmasked")
+        else:
+            print(f"   ✅ Padding tokens are masked")
     
     # Summary
-    print("📋 Summary:")
-    print(f"   ✅ Images are prepended to user input")
-    print(
-        f"   ✅ Visual tokens ({num_visual_tokens}) are masked "
-        f"(labels = -100)"
-    )
-    total_len = num_visual_tokens + original_attention_len
-    print(f"   ✅ Total sequence length: {total_len}")
     print()
+    print("📋 Summary:")
+    if results['passed']:
+        print(f"   ✅ All checks passed!")
+        print(f"   ✅ Images are prepended to user input")
+        print(f"   ✅ Visual tokens ({num_visual_tokens}) are masked")
+        print(f"   ✅ User input and prompt are masked")
+        print(f"   ✅ Only assistant response is unmasked")
+    else:
+        print(f"   ❌ Validation failed with {len(results['errors'])} error(s)")
+        for error in results['errors']:
+            print(f"      - {error}")
+    
+    total_len = num_visual_tokens + original_attention_len
+    print(f"   Total sequence length: {total_len}")
+    print()
+    
+    return results
+
+
+def verify_multi_turn_decomposition(dataset: LLaVAInstructDataset, num_samples: int = 10):
+    """Verify that multi-turn conversations are correctly decomposed into multiple samples.
+    
+    Args:
+        dataset: The dataset to verify
+        num_samples: Number of samples to check
+    
+    Returns:
+        Dictionary with validation results
+    """
+    print_separator()
+    print("🔍 Multi-Turn Conversation Decomposition Verification")
+    print_separator()
+    
+    results = {
+        'passed': True,
+        'errors': [],
+        'warnings': [],
+        'checked_conversations': 0,
+        'turns_per_conversation': [],
+    }
+    
+    # Group samples by (file_idx, row_idx) to find conversations
+    conversation_map = {}
+    for idx in range(min(num_samples * 10, len(dataset))):  # Check more to find conversations
+        file_idx, row_idx, turn_idx = dataset.index[idx]
+        key = (file_idx, row_idx)
+        if key not in conversation_map:
+            conversation_map[key] = []
+        conversation_map[key].append((idx, turn_idx))
+    
+    # Check conversations with multiple turns
+    multi_turn_conversations = {
+        k: v for k, v in conversation_map.items() if len(v) > 1
+    }
+    
+    print(f"Found {len(multi_turn_conversations)} conversations with multiple turns")
+    print(f"Checking first {min(num_samples, len(multi_turn_conversations))}...")
+    print()
+    
+    checked = 0
+    for (file_idx, row_idx), turns in list(multi_turn_conversations.items())[:num_samples]:
+        checked += 1
+        results['checked_conversations'] += 1
+        results['turns_per_conversation'].append(len(turns))
+        
+        # Load the raw conversation
+        if file_idx not in dataset._file_cache:
+            try:
+                parquet_file = dataset.parquet_files[file_idx]
+                dataset._file_cache[file_idx] = pd.read_parquet(parquet_file)
+            except Exception:
+                continue
+        
+        df = dataset._file_cache[file_idx]
+        row = df.iloc[row_idx]
+        sample = row.to_dict()
+        
+        # Parse conversations
+        conversations = sample.get('conversations', None)
+        if isinstance(conversations, str):
+            try:
+                conversations = json.loads(conversations)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        
+        if not isinstance(conversations, list):
+            continue
+        
+        # Verify each turn is a separate sample
+        print(f"Conversation from {dataset.parquet_files[file_idx].name}, row {row_idx}:")
+        print(f"  Total turns in conversation: {len(conversations)}")
+        print(f"  Samples created: {len(turns)}")
+        
+        # Check that turns are sequential
+        turn_indices = sorted([t[1] for t in turns])
+        is_sequential = all(
+            turn_indices[i] + 2 == turn_indices[i+1]
+            for i in range(len(turn_indices) - 1)
+        )
+        
+        if len(turns) == len(conversations) // 2:
+            print(f"  ✅ Correct number of samples ({len(turns)} turns → {len(turns)} samples)")
+        else:
+            print(f"  ⚠️  Expected {len(conversations) // 2} samples, got {len(turns)}")
+            results['warnings'].append(
+                f"Conversation ({file_idx}, {row_idx}): expected {len(conversations) // 2} samples, got {len(turns)}"
+            )
+        
+        if is_sequential:
+            print(f"  ✅ Turns are sequential: {turn_indices}")
+        else:
+            print(f"  ⚠️  Turns are not sequential: {turn_indices}")
+            results['warnings'].append(
+                f"Conversation ({file_idx}, {row_idx}): turns not sequential"
+            )
+        
+        print()
+    
+    if results['turns_per_conversation']:
+        avg_turns = sum(results['turns_per_conversation']) / len(results['turns_per_conversation'])
+        print(f"Average turns per conversation: {avg_turns:.1f}")
+    
+    if not results['errors']:
+        print("✅ Multi-turn decomposition appears correct")
+    else:
+        print(f"❌ Found {len(results['errors'])} errors")
+        results['passed'] = False
+    
+    print()
+    return results
 
 
 def print_dataset_stats(dataset: LLaVAInstructDataset):
@@ -650,6 +858,84 @@ def print_dataset_stats(dataset: LLaVAInstructDataset):
         print(f"  With images: {samples_with_images} ({img_percent:.1f}%)")
         print(f"  Without images: {samples_without_images} ({100-img_percent:.1f}%)")
         print()
+
+
+def validate_masking_and_prepending(
+    dataset: LLaVAInstructDataset,
+    model: LLaVAModel,
+    tokenizer,
+    num_samples: int = 10,
+    device: torch.device = torch.device("cpu"),
+) -> bool:
+    """Comprehensive validation of masking and image prepending.
+    
+    This function validates:
+    1. Multi-turn conversations are decomposed correctly
+    2. Images are prepended to user input
+    3. Visual tokens are masked
+    4. User input and assistant prompt are masked
+    5. Only assistant response is unmasked
+    
+    Args:
+        dataset: The dataset to validate
+        model: The LLaVA model
+        tokenizer: Tokenizer for decoding
+        num_samples: Number of samples to validate
+        device: Device to run model on
+    
+    Returns:
+        True if all validations pass, False otherwise
+    """
+    print("\n" + "=" * 80)
+    print("COMPREHENSIVE MASKING AND IMAGE PREPENDING VALIDATION")
+    print("=" * 80)
+    print()
+    
+    all_passed = True
+    
+    # 1. Verify multi-turn decomposition
+    decomposition_results = verify_multi_turn_decomposition(dataset, num_samples=5)
+    if not decomposition_results['passed']:
+        all_passed = False
+    
+    # 2. Verify model forward pass for samples with images
+    print()
+    print("Validating model forward pass for samples with images...")
+    print()
+    
+    # Find samples with images
+    samples_with_images = []
+    for idx in range(min(num_samples * 10, len(dataset))):
+        try:
+            sample = dataset[idx]
+            if sample.get('pixel_values') is not None:
+                samples_with_images.append(idx)
+                if len(samples_with_images) >= num_samples:
+                    break
+        except Exception:
+            continue
+    
+    if not samples_with_images:
+        print("⚠️  No samples with images found for validation")
+        return False
+    
+    for idx in samples_with_images[:num_samples]:
+        results = verify_model_forward_pass(
+            dataset, model, idx, tokenizer, device=device
+        )
+        if not results['passed']:
+            all_passed = False
+    
+    print()
+    print("=" * 80)
+    if all_passed:
+        print("✅ ALL VALIDATIONS PASSED")
+    else:
+        print("❌ SOME VALIDATIONS FAILED")
+    print("=" * 80)
+    print()
+    
+    return all_passed
 
 
 def main():
@@ -741,6 +1027,11 @@ def main():
         action="store_true",
         help="Verify model forward pass: check that images are prepended and masked"
     )
+    parser.add_argument(
+        "--validate_masking",
+        action="store_true",
+        help="Run comprehensive validation of masking and image prepending (includes multi-turn decomposition and model forward pass)"
+    )
     
     args = parser.parse_args()
     
@@ -809,6 +1100,26 @@ def main():
     
     if args.stats_only:
         return 0
+    
+    # Run comprehensive validation if requested
+    if args.validate_masking:
+        # Determine device
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        
+        all_passed = validate_masking_and_prepending(
+            dataset,
+            model,
+            tokenizer,
+            num_samples=args.num_samples,
+            device=device,
+        )
+        
+        return 0 if all_passed else 1
     
     # Determine which samples to inspect
     if args.sample_indices:

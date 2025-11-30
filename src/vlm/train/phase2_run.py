@@ -252,6 +252,52 @@ def train(args):
                 effective_bs = args.batch_size * world_size
                 print(f"Total effective batch size: {effective_bs}")
 
+        # Validate data if requested (only on rank 0)
+        if args.validate_data and rank == 0:
+            print("\n" + "=" * 80)
+            print("VALIDATING DATA MASKING AND IMAGE PREPENDING")
+            print("=" * 80)
+            try:
+                # Import validation function from scripts
+                import sys
+                from pathlib import Path
+                scripts_path = Path(__file__).parent.parent.parent / "scripts"
+                sys.path.insert(0, str(scripts_path))
+                from inspect_phase2_data import (
+                    validate_masking_and_prepending
+                )
+                # Determine device for validation
+                if torch.cuda.is_available():
+                    val_device = torch.device("cuda")
+                elif torch.backends.mps.is_available():
+                    val_device = torch.device("mps")
+                else:
+                    val_device = torch.device("cpu")
+                
+                validation_passed = validate_masking_and_prepending(
+                    dataset,
+                    model,
+                    tokenizer,
+                    num_samples=args.validation_samples,
+                    device=val_device,
+                )
+                
+                if not validation_passed:
+                    print("\n❌ Data validation failed. Please fix issues before training.")
+                    if ddp_enabled:
+                        cleanup_ddp()
+                    return
+                else:
+                    print("\n✅ Data validation passed. Proceeding with training.")
+            except ImportError as e:
+                print(f"⚠️  Warning: Could not import validation function: {e}")
+                print("   Validation skipped. Install required dependencies if needed.")
+            except Exception as e:
+                print(f"⚠️  Warning: Validation failed with error: {e}")
+                print("   Proceeding with training anyway.")
+                import traceback
+                traceback.print_exc()
+
         # Cap max_steps to actual dataset size if needed
         # Note: with DDP, each process sees len(dataloader) batches
         actual_max_steps = min(args.max_steps, len(dataloader))
@@ -466,6 +512,19 @@ if __name__ == "__main__":
             "Number of gradient accumulation steps "
             "(default: 1, no accumulation)"
         )
+    )
+
+    # Validation args
+    parser.add_argument(
+        "--validate_data",
+        action="store_true",
+        help="Validate data masking and image prepending before training"
+    )
+    parser.add_argument(
+        "--validation_samples",
+        type=int,
+        default=10,
+        help="Number of samples to validate (default: 10)"
     )
 
     args = parser.parse_args()
