@@ -3,17 +3,17 @@
 
 Single GPU/CPU training:
 python src/vlm/train/phase2_run.py \
-    --checkpoint ~/models/llava/checkpoint_phase1.pt \
+    --checkpoint ~/models/llava/checkpoint_phase1_fp16.pt \
     --data_path ~/dataset/llava-instruct-mix/data \
     --max_steps 10 --batch_size 2 --use_cosine_schedule \
     --use_wandb --output_dir ~/models/llava
 
 Distributed training (automatically enabled when using torchrun):
 torchrun --nproc_per_node=2 src/vlm/train/phase2_run.py \
-    --checkpoint ~/models/llava/checkpoint_phase1.pt \
+    --checkpoint ~/models/llava/checkpoint_phase1_fp16.pt \
     --data_path ~/dataset/llava-instruct-mix/data \
     --max_steps 10000 --batch_size 16 --use_cosine_schedule \
-    --gradient_accumulation_steps 2 --use_fp16 \
+    --gradient_accumulation_steps 2 --precision fp16 \
     --output_dir ~/models/llava --learning_rate 2e-5
 
 Note: --data_path should point to a folder containing parquet files.
@@ -23,6 +23,7 @@ All .parquet files in the folder will be loaded and concatenated.
 import argparse
 import math
 import os
+import sys
 from pathlib import Path
 import torch
 import torch.distributed as dist
@@ -259,7 +260,6 @@ def train(args):
             print("=" * 80)
             try:
                 # Import validation function from scripts
-                import sys
                 from pathlib import Path
                 scripts_path = Path(__file__).parent.parent.parent / "scripts"
                 sys.path.insert(0, str(scripts_path))
@@ -361,10 +361,20 @@ def train(args):
             )
 
     # 5. Initialize Trainer
-    # Determine if fp16 should be enabled (only if CUDA is available)
-    use_fp16 = args.use_fp16 and torch.cuda.is_available()
-    if rank == 0 and use_fp16:
-        print("✅ FP16/Mixed precision training will be enabled")
+    # Validate precision argument
+    precision = args.precision.lower()
+    if precision not in ["fp16", "bf16", "fp8", "fp32"]:
+        if rank == 0:
+            print(
+                f"Error: Invalid precision '{precision}'. "
+                "Must be 'fp16', 'bf16', 'fp8', or 'fp32'."
+            )
+        if ddp_enabled:
+            cleanup_ddp()
+        return
+    
+    if rank == 0:
+        print(f"Using precision: {precision}")
 
     # Calculate effective batch size with gradient accumulation
     effective_batch_size = (
@@ -391,7 +401,7 @@ def train(args):
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         scheduler=scheduler,
-        use_fp16=use_fp16,
+        precision=precision,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         hyperparams={
             "learning_rate": args.learning_rate,
@@ -409,7 +419,7 @@ def train(args):
             ),
             "ddp_enabled": ddp_enabled,
             "world_size": world_size,
-            "use_fp16": use_fp16,
+            "precision": precision,
         }
     )
 
@@ -498,9 +508,16 @@ if __name__ == "__main__":
 
     # Mixed precision args
     parser.add_argument(
-        "--use_fp16",
-        action="store_true",
-        help="Enable fp16/mixed precision training (requires CUDA)"
+        "--precision",
+        type=str,
+        default="fp16",
+        choices=["fp16", "bf16", "fp8", "fp32"],
+        help=(
+            "Mixed precision mode: 'fp16' (default), 'bf16', 'fp8', or 'fp32'. "
+            "fp16: CUDA (with gradient scaling) or MPS. "
+            "bf16: CUDA (with bf16 support) or MPS. "
+            "fp8: CUDA only, requires accelerate with Transformer Engine/MS-AMP."
+        )
     )
 
     # Gradient accumulation args
