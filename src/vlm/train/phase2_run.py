@@ -193,7 +193,6 @@ def train(args):
         print("Setting up data...")
     data_config = Phase2DataConfig(
         data_path=args.data_path,
-        image_folder=args.image_folder,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         max_length=args.max_length
@@ -211,7 +210,6 @@ def train(args):
         )
         dataset = LLaVAInstructDataset(
             data_path=data_config.data_path,
-            image_folder=data_config.image_folder,
             image_processor=image_processor,
             tokenizer=tokenizer,
             max_length=data_config.max_length,
@@ -389,16 +387,6 @@ if __name__ == "__main__":
         type=str,
         default="~/dataset/llava-instruct",
         help="Path to folder containing parquet files"
-    )
-    parser.add_argument(
-        "--image_folder",
-        type=str,
-        default=None,
-        help=(
-            "Path to image folder (optional). "
-            "Only needed if images are stored separately. "
-            "If images are embedded in the JSON, leave this unset."
-        )
     )
 
     # Training args

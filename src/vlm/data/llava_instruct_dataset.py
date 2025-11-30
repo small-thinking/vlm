@@ -40,8 +40,6 @@ class LLaVAInstructDataset(Dataset):
     
     Args:
         data_path: Path to folder containing parquet files (or single file)
-        image_folder: Path to folder containing images (optional)
-            If None, images are expected to be embedded in the dataset
         image_processor: Processor for vision encoder
             (e.g., CLIPImageProcessor)
         tokenizer: Tokenizer for language model
@@ -53,17 +51,12 @@ class LLaVAInstructDataset(Dataset):
     def __init__(
         self,
         data_path: str,
-        image_folder: Optional[str] = None,
         image_processor: Optional[CLIPImageProcessor] = None,
         tokenizer: Optional[Any] = None,
         max_length: int = 768,
         num_visual_tokens: int = 257,  # CLIP ViT-L/14: 256 patches + 1 CLS
     ):
-        # Expand ~ to home directory for both paths
         data_path_expanded = Path(data_path).expanduser()
-        self.image_folder = (
-            Path(image_folder).expanduser() if image_folder else None
-        )
         self.image_processor = image_processor
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -238,7 +231,7 @@ class LLaVAInstructDataset(Dataset):
         """Process image from various formats to PIL Image.
         
         Args:
-            image: Image in various formats (PIL, bytes, numpy, etc.)
+            image: Image in various formats (PIL, bytes, numpy, dict with 'bytes' key, etc.)
             
         Returns:
             PIL Image in RGB format or None if conversion fails
@@ -247,6 +240,23 @@ class LLaVAInstructDataset(Dataset):
             return None
         
         try:
+            # Handle dictionary format (common in parquet files)
+            if isinstance(image, dict):
+                # Try 'bytes' key first (common in parquet)
+                if 'bytes' in image:
+                    image = image['bytes']
+                # Try 'image' key
+                elif 'image' in image:
+                    image = image['image']
+                else:
+                    # Try to get first value that looks like bytes
+                    for key, value in image.items():
+                        if isinstance(value, bytes):
+                            image = value
+                            break
+                    else:
+                        return None
+            
             if isinstance(image, Image.Image):
                 return image.convert('RGB')
             elif isinstance(image, bytes):
@@ -290,22 +300,13 @@ class LLaVAInstructDataset(Dataset):
         sample = row.to_dict()
         
         # Get image from conversation (same for all turns)
-        # Support both embedded images and local file paths
+        # Images are embedded in parquet files
         raw_image = sample.get('image', None)
-        image_path = sample.get('image_path', None)
         
         conversation_image = None
         if raw_image is not None:
             # Embedded image (bytes, PIL, numpy, etc.)
             conversation_image = self._process_image(raw_image)
-        elif image_path is not None and self.image_folder is not None:
-            # Local file path
-            try:
-                full_path = self.image_folder / image_path
-                if full_path.exists():
-                    conversation_image = Image.open(full_path).convert('RGB')
-            except Exception as e:
-                print(f"Warning: Could not load image {image_path}: {e}")
         
         # Parse the specific turn on-the-fly
         conversations = sample.get('conversations', None)
@@ -463,8 +464,14 @@ class LLaVAInstructDataset(Dataset):
         result['attention_mask'] = attention_mask
         
         # Mask input (user + prompt), keep target (assistant response)
+        # Also mask padding tokens
         result['labels'] = full_ids.clone()
-        result['labels'][:input_len] = -100
+        result['labels'][:input_len] = -100  # Mask user input and assistant prompt
+        
+        # Mask padding tokens (where attention_mask is 0)
+        if attention_mask is not None:
+            padding_mask = attention_mask == 0
+            result['labels'][padding_mask] = -100
         
         if input_len > len(full_ids):
             raise ValueError(
@@ -515,7 +522,7 @@ def build_instruct_dataloader(
     """Build DataLoader for LLaVA instruction tuning.
     
     Args:
-        config: Phase 2 data configuration (image_folder is optional)
+        config: Phase 2 data configuration
         tokenizer: Tokenizer for language model
         image_processor: Image processor for vision encoder
         
@@ -524,7 +531,6 @@ def build_instruct_dataloader(
     """
     dataset = LLaVAInstructDataset(
         data_path=config.data_path,
-        image_folder=config.image_folder,
         image_processor=image_processor,
         tokenizer=tokenizer,
         max_length=config.max_length,
