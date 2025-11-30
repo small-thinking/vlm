@@ -576,7 +576,7 @@ class Phase1Trainer:
             self.wandb.finish()
 
     def save_checkpoint(self, filename: str):
-        """Save model checkpoint.
+        """Save model checkpoint with the corresponding precision.
 
         Args:
             filename: Name of the checkpoint file
@@ -586,10 +586,22 @@ class Phase1Trainer:
             output_dir = Path(self.output_dir).expanduser()
             os.makedirs(output_dir, exist_ok=True)
             checkpoint_path = output_dir / filename
-            # Save underlying model state (unwrap DDP if needed)
-            torch.save(
-                self.underlying_model.state_dict(),
-                str(checkpoint_path)
+            
+            # Get state dict and convert to training precision if needed
+            # (autocast doesn't change parameter dtype, so we convert on save)
+            state_dict = self.underlying_model.state_dict()
+            if self.amp_dtype is not None:
+                # Convert state dict parameters to training precision dtype
+                state_dict = {
+                    k: v.to(dtype=self.amp_dtype) if v.is_floating_point()
+                    else v
+                    for k, v in state_dict.items()
+                }
+            
+            # Save state dict with correct precision
+            torch.save(state_dict, str(checkpoint_path))
+            print(
+                f"Saved checkpoint to {checkpoint_path} "
+                f"(precision: {self.precision})"
             )
-            print(f"Saved checkpoint to {checkpoint_path}")
 
