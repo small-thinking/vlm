@@ -1,6 +1,5 @@
 """Data configuration classes for LLaVA training phases."""
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -25,10 +24,9 @@ class Phase2DataConfig:
 
     Phase 2 loads parquet files from a folder. All .parquet files in the
     folder will be loaded and concatenated. Images are embedded in the
-    parquet files, so image_folder is optional.
+    parquet files.
     """
     data_path: str  # Path to folder containing parquet files
-    image_folder: Optional[str] = None  # Optional for Phase 2
     batch_size: int = 32
     num_workers: int = 4
     max_length: int = 768  # Longer sequences for instruction tuning

@@ -4,16 +4,16 @@
 Single GPU/CPU training:
 python src/vlm/train/phase2_run.py \
     --checkpoint ~/models/llava/checkpoint_phase1.pt \
-    --data_path ~/dataset/llava-instruct-mix \
+    --data_path ~/dataset/llava-instruct-mix/data \
     --max_steps 10 --batch_size 2 --use_cosine_schedule \
     --use_wandb --output_dir ~/models/llava
 
 Distributed training (automatically enabled when using torchrun):
 torchrun --nproc_per_node=2 src/vlm/train/phase2_run.py \
     --checkpoint ~/models/llava/checkpoint_phase1.pt \
-    --data_path ~/dataset/llava-instruct-mix \
-    --max_steps 10000 --batch_size 32 --use_cosine_schedule \
-    --gradient_accumulation_steps 4 --use_fp16 \
+    --data_path ~/dataset/llava-instruct-mix/data \
+    --max_steps 10000 --batch_size 16 --use_cosine_schedule \
+    --gradient_accumulation_steps 2 --use_fp16 \
     --output_dir ~/models/llava --learning_rate 2e-5
 
 Note: --data_path should point to a folder containing parquet files.
@@ -193,7 +193,6 @@ def train(args):
         print("Setting up data...")
     data_config = Phase2DataConfig(
         data_path=args.data_path,
-        image_folder=args.image_folder,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         max_length=args.max_length
@@ -211,7 +210,6 @@ def train(args):
         )
         dataset = LLaVAInstructDataset(
             data_path=data_config.data_path,
-            image_folder=data_config.image_folder,
             image_processor=image_processor,
             tokenizer=tokenizer,
             max_length=data_config.max_length,
@@ -253,6 +251,52 @@ def train(args):
             if ddp_enabled:
                 effective_bs = args.batch_size * world_size
                 print(f"Total effective batch size: {effective_bs}")
+
+        # Validate data if requested (only on rank 0)
+        if args.validate_data and rank == 0:
+            print("\n" + "=" * 80)
+            print("VALIDATING DATA MASKING AND IMAGE PREPENDING")
+            print("=" * 80)
+            try:
+                # Import validation function from scripts
+                import sys
+                from pathlib import Path
+                scripts_path = Path(__file__).parent.parent.parent / "scripts"
+                sys.path.insert(0, str(scripts_path))
+                from inspect_phase2_data import (
+                    validate_masking_and_prepending
+                )
+                # Determine device for validation
+                if torch.cuda.is_available():
+                    val_device = torch.device("cuda")
+                elif torch.backends.mps.is_available():
+                    val_device = torch.device("mps")
+                else:
+                    val_device = torch.device("cpu")
+                
+                validation_passed = validate_masking_and_prepending(
+                    dataset,
+                    model,
+                    tokenizer,
+                    num_samples=args.validation_samples,
+                    device=val_device,
+                )
+                
+                if not validation_passed:
+                    print("\n❌ Data validation failed. Please fix issues before training.")
+                    if ddp_enabled:
+                        cleanup_ddp()
+                    return
+                else:
+                    print("\n✅ Data validation passed. Proceeding with training.")
+            except ImportError as e:
+                print(f"⚠️  Warning: Could not import validation function: {e}")
+                print("   Validation skipped. Install required dependencies if needed.")
+            except Exception as e:
+                print(f"⚠️  Warning: Validation failed with error: {e}")
+                print("   Proceeding with training anyway.")
+                import traceback
+                traceback.print_exc()
 
         # Cap max_steps to actual dataset size if needed
         # Note: with DDP, each process sees len(dataloader) batches
@@ -390,16 +434,6 @@ if __name__ == "__main__":
         default="~/dataset/llava-instruct",
         help="Path to folder containing parquet files"
     )
-    parser.add_argument(
-        "--image_folder",
-        type=str,
-        default=None,
-        help=(
-            "Path to image folder (optional). "
-            "Only needed if images are stored separately. "
-            "If images are embedded in the JSON, leave this unset."
-        )
-    )
 
     # Training args
     parser.add_argument("--batch_size", type=int, default=8,
@@ -478,6 +512,19 @@ if __name__ == "__main__":
             "Number of gradient accumulation steps "
             "(default: 1, no accumulation)"
         )
+    )
+
+    # Validation args
+    parser.add_argument(
+        "--validate_data",
+        action="store_true",
+        help="Validate data masking and image prepending before training"
+    )
+    parser.add_argument(
+        "--validation_samples",
+        type=int,
+        default=10,
+        help="Number of samples to validate (default: 10)"
     )
 
     args = parser.parse_args()
