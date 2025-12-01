@@ -6,6 +6,25 @@ from PIL import Image
 from ..models.llava import LLaVAModel
 
 
+def _get_model_dtype(model: LLaVAModel) -> torch.dtype:
+    """Get the dtype of the model parameters.
+    
+    Args:
+        model: LLaVA model instance
+        
+    Returns:
+        Model dtype (bfloat16, float16, or float32)
+    """
+    # Check connector dtype first (most likely to be in training dtype)
+    connector_param = next(model.connector.parameters())
+    if connector_param.dtype in (torch.bfloat16, torch.float16, torch.float32):
+        return connector_param.dtype
+    
+    # Fall back to language model dtype
+    lm_param = next(model.language_model.parameters())
+    return lm_param.dtype
+
+
 def generate_response(
     model: LLaVAModel,
     image_path: Optional[str] = None,
@@ -36,6 +55,9 @@ def generate_response(
     model.eval()
     tokenizer = model.language_model.tokenizer
     
+    # Get model dtype to ensure consistency
+    model_dtype = _get_model_dtype(model)
+    
     # Process image if provided
     pixel_values = None
     if image_path:
@@ -46,6 +68,9 @@ def generate_response(
                 return_tensors='pt'
             )
             pixel_values = processed['pixel_values'].to(device)
+            # Convert pixel_values to model dtype to avoid dtype mismatches
+            if pixel_values.dtype != model_dtype and pixel_values.is_floating_point():
+                pixel_values = pixel_values.to(dtype=model_dtype)
     
     # Tokenize text
     text_input = f"Human: {text}\nAssistant:" if text else "Assistant:"
@@ -63,6 +88,9 @@ def generate_response(
         
         if pixel_values is not None:
             visual_embeds = model.encode_images(pixel_values)
+            # Ensure visual_embeds match text_embeds dtype
+            if visual_embeds.dtype != text_embeds.dtype:
+                visual_embeds = visual_embeds.to(dtype=text_embeds.dtype)
             # Extend attention mask for visual tokens
             visual_mask = torch.ones(
                 visual_embeds.size()[:-1],
@@ -111,6 +139,9 @@ def generate_response(
             
             # Update for next iteration
             next_embed = embed_layer(next_token_id)
+            # Ensure next_embed matches inputs_embeds dtype
+            if next_embed.dtype != inputs_embeds.dtype:
+                next_embed = next_embed.to(dtype=inputs_embeds.dtype)
             inputs_embeds = torch.cat([inputs_embeds, next_embed], dim=1)
             attention_mask = torch.cat([
                 attention_mask,
@@ -160,6 +191,9 @@ def generate_response_stream(
     model.eval()
     tokenizer = model.language_model.tokenizer
     
+    # Get model dtype to ensure consistency
+    model_dtype = _get_model_dtype(model)
+    
     # Process image if provided
     pixel_values = None
     if image_path:
@@ -170,6 +204,9 @@ def generate_response_stream(
                 return_tensors='pt'
             )
             pixel_values = processed['pixel_values'].to(device)
+            # Convert pixel_values to model dtype to avoid dtype mismatches
+            if pixel_values.dtype != model_dtype and pixel_values.is_floating_point():
+                pixel_values = pixel_values.to(dtype=model_dtype)
     
     # Tokenize text
     text_input = f"Human: {text}\nAssistant:" if text else "Assistant:"
@@ -187,6 +224,9 @@ def generate_response_stream(
         
         if pixel_values is not None:
             visual_embeds = model.encode_images(pixel_values)
+            # Ensure visual_embeds match text_embeds dtype
+            if visual_embeds.dtype != text_embeds.dtype:
+                visual_embeds = visual_embeds.to(dtype=text_embeds.dtype)
             # Extend attention mask for visual tokens
             visual_mask = torch.ones(
                 visual_embeds.size()[:-1],
@@ -247,6 +287,9 @@ def generate_response_stream(
             
             # Update for next iteration
             next_embed = embed_layer(next_token_id)
+            # Ensure next_embed matches inputs_embeds dtype
+            if next_embed.dtype != inputs_embeds.dtype:
+                next_embed = next_embed.to(dtype=inputs_embeds.dtype)
             inputs_embeds = torch.cat([inputs_embeds, next_embed], dim=1)
             attention_mask = torch.cat([
                 attention_mask,

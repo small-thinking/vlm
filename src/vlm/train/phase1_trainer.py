@@ -7,7 +7,6 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
-from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -55,8 +54,8 @@ class Phase1Trainer:
                 (e.g., learning_rate, batch_size)
             save_checkpoint_interval: Interval for saving checkpoints
                 (default: 500 steps)
-            precision: Mixed precision mode: "bf16", "fp8", or "fp32"
-                (default: "bf16")
+            precision: Mixed precision mode: "fp16", "bf16", or "fp32"
+                (default: "fp16")
             gradient_accumulation_steps: Number of gradient accumulation steps
                 (default: 1, no accumulation)
         """
@@ -91,46 +90,12 @@ class Phase1Trainer:
             type(model).__name__ == 'DistributedDataParallel'
         )
 
-        # Setup mixed precision training (fp16, bf16, fp8, or fp32)
-        self.accelerator = None
+        # Setup mixed precision training (fp16, bf16, or fp32)
         self.scaler = None
         self.amp_dtype = None
         self.device_type = "cuda" if device.type == "cuda" else device.type
-        
-        if precision == "fp8":
-            # Use accelerate for fp8 (requires Transformer Engine or MS-AMP)
-            if not torch.cuda.is_available():
-                if self.rank == 0:
-                    print(
-                        "⚠️  FP8 requires CUDA. Falling back to bf16."
-                    )
-                precision = "bf16"
-            else:
-                try:
-                    self.accelerator = Accelerator(mixed_precision="fp8")
-                    if self.rank == 0:
-                        print("✅ FP8 training enabled (using accelerate)")
-                    # Prepare model, optimizer, and dataloader with accelerate
-                    # Note: When using accelerate, it handles DDP internally
-                    # so don't pre-wrap with DDP in the run script
-                    self.model = self.accelerator.prepare(self.model)
-                    self.optimizer = self.accelerator.prepare(self.optimizer)
-                    self.train_dataloader = (
-                        self.accelerator.prepare(self.train_dataloader)
-                    )
-                    # Update underlying_model after accelerate preparation
-                    if hasattr(self.model, 'module'):
-                        self.underlying_model = self.model.module
-                    else:
-                        self.underlying_model = self.model
-                except (ImportError, RuntimeError) as e:
-                    if self.rank == 0:
-                        print(
-                            f"⚠️  FP8 not available ({e}). "
-                            "Falling back to bf16."
-                        )
-                    precision = "bf16"
-        elif precision == "fp16":
+
+        if precision == "fp16":
             # FP16 support: CUDA (with gradient scaling) or MPS/CPU (limited)
             if device.type == "cuda":
                 self.amp_dtype = torch.float16
@@ -199,15 +164,14 @@ class Phase1Trainer:
         else:
             raise ValueError(
                 f"Invalid precision: {precision}. "
-                "Must be 'fp16', 'bf16', 'fp8', or 'fp32'"
+                "Must be 'fp16', 'bf16', or 'fp32'"
             )
 
-        # Get underlying model if wrapped with DDP (only if not using accelerate)
-        if self.accelerator is None:
-            if self.ddp_enabled:
-                self.underlying_model = model.module
-            else:
-                self.underlying_model = model
+        # Get underlying model if wrapped with DDP
+        if self.ddp_enabled:
+            self.underlying_model = model.module
+        else:
+            self.underlying_model = model
 
         # Phase 1: Freeze VLM/LLM, Train Connector
         # Set training stage on underlying model
@@ -315,16 +279,7 @@ class Phase1Trainer:
             # 2. pixel_values → CLIP encoder → visual features
             # 3. visual features → connector → visual embeddings
             # 4. visual embeddings concatenated with text embeddings
-            if self.accelerator is not None:
-                # FP8 training with accelerate
-                outputs = self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    images=pixel_values
-                )
-                loss = outputs.loss
-            elif self.amp_dtype is not None:
+            if self.amp_dtype is not None:
                 # Mixed precision training with autocast (fp16 or bf16)
                 # Use device-appropriate autocast
                 if self.device_type == "cuda":
@@ -384,10 +339,7 @@ class Phase1Trainer:
             loss = loss / self.gradient_accumulation_steps
 
             # Backward pass
-            if self.accelerator is not None:
-                # FP8 training with accelerate
-                self.accelerator.backward(loss)
-            elif self.scaler is not None:
+            if self.scaler is not None:
                 # FP16 on CUDA requires gradient scaling
                 self.scaler.scale(loss).backward()
             else:
@@ -397,16 +349,7 @@ class Phase1Trainer:
             # Only update optimizer and scheduler after accumulating all steps
             grad_norm = None
             if accumulation_step == self.gradient_accumulation_steps:
-                if self.accelerator is not None:
-                    # FP8 training with accelerate
-                    # Gradient clipping
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=self.max_grad_norm
-                    )
-                    # Optimizer step with accelerate
-                    self.accelerator.step(self.optimizer)
-                elif self.scaler is not None:
+                if self.scaler is not None:
                     # FP16 on CUDA - unscale before clipping
                     self.scaler.unscale_(self.optimizer)
                     # Gradient clipping
@@ -536,14 +479,7 @@ class Phase1Trainer:
         # Handle final optimizer step if we have accumulated gradients
         # but haven't stepped yet
         if accumulation_step > 0:
-            if self.accelerator is not None:
-                # FP8 training with accelerate
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    max_norm=self.max_grad_norm
-                )
-                self.accelerator.step(self.optimizer)
-            elif self.scaler is not None:
+            if self.scaler is not None:
                 # FP16 on CUDA - unscale before clipping
                 self.scaler.unscale_(self.optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -586,7 +522,7 @@ class Phase1Trainer:
             output_dir = Path(self.output_dir).expanduser()
             os.makedirs(output_dir, exist_ok=True)
             checkpoint_path = output_dir / filename
-            
+
             # Get state dict and convert to training precision if needed
             # (autocast doesn't change parameter dtype, so we convert on save)
             state_dict = self.underlying_model.state_dict()
@@ -597,11 +533,10 @@ class Phase1Trainer:
                     else v
                     for k, v in state_dict.items()
                 }
-            
+
             # Save state dict with correct precision
             torch.save(state_dict, str(checkpoint_path))
             print(
                 f"Saved checkpoint to {checkpoint_path} "
                 f"(precision: {self.precision})"
             )
-

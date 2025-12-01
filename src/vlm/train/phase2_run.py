@@ -10,10 +10,10 @@ python src/vlm/train/phase2_run.py \
 
 Distributed training (automatically enabled when using torchrun):
 torchrun --nproc_per_node=2 src/vlm/train/phase2_run.py \
-    --checkpoint ~/models/llava/checkpoint_phase1_fp16.pt \
+    --checkpoint ~/models/llava/checkpoint_phase1_bf16.pt \
     --data_path ~/dataset/llava-instruct-mix/data \
     --max_steps 10000 --batch_size 16 --use_cosine_schedule \
-    --gradient_accumulation_steps 2 --precision fp16 \
+    --gradient_accumulation_steps 4 --precision bf16 \
     --output_dir ~/models/llava --learning_rate 2e-5
 
 Note: --data_path should point to a folder containing parquet files.
@@ -260,12 +260,9 @@ def train(args):
             print("=" * 80)
             try:
                 # Import validation function from scripts
-                from pathlib import Path
                 scripts_path = Path(__file__).parent.parent.parent / "scripts"
                 sys.path.insert(0, str(scripts_path))
-                from inspect_phase2_data import (
-                    validate_masking_and_prepending
-                )
+                from inspect_phase2_data import validate_masking_and_prepending
                 # Determine device for validation
                 if torch.cuda.is_available():
                     val_device = torch.device("cuda")
@@ -273,7 +270,7 @@ def train(args):
                     val_device = torch.device("mps")
                 else:
                     val_device = torch.device("cpu")
-                
+
                 validation_passed = validate_masking_and_prepending(
                     dataset,
                     model,
@@ -281,17 +278,28 @@ def train(args):
                     num_samples=args.validation_samples,
                     device=val_device,
                 )
-                
+
                 if not validation_passed:
-                    print("\n❌ Data validation failed. Please fix issues before training.")
+                    print(
+                        "\n❌ Data validation failed. "
+                        "Please fix issues before training."
+                    )
                     if ddp_enabled:
                         cleanup_ddp()
                     return
                 else:
-                    print("\n✅ Data validation passed. Proceeding with training.")
+                    print(
+                        "\n✅ Data validation passed. "
+                        "Proceeding with training."
+                    )
             except ImportError as e:
-                print(f"⚠️  Warning: Could not import validation function: {e}")
-                print("   Validation skipped. Install required dependencies if needed.")
+                print(
+                    f"⚠️  Warning: Could not import validation function: {e}"
+                )
+                print(
+                    "   Validation skipped. "
+                    "Install required dependencies if needed."
+                )
             except Exception as e:
                 print(f"⚠️  Warning: Validation failed with error: {e}")
                 print("   Proceeding with training anyway.")
@@ -363,16 +371,16 @@ def train(args):
     # 5. Initialize Trainer
     # Validate precision argument
     precision = args.precision.lower()
-    if precision not in ["fp16", "bf16", "fp8", "fp32"]:
+    if precision not in ["fp16", "bf16", "fp32"]:
         if rank == 0:
             print(
                 f"Error: Invalid precision '{precision}'. "
-                "Must be 'fp16', 'bf16', 'fp8', or 'fp32'."
+                "Must be 'fp16', 'bf16', or 'fp32'."
             )
         if ddp_enabled:
             cleanup_ddp()
         return
-    
+
     if rank == 0:
         print(f"Using precision: {precision}")
 
@@ -511,12 +519,11 @@ if __name__ == "__main__":
         "--precision",
         type=str,
         default="fp16",
-        choices=["fp16", "bf16", "fp8", "fp32"],
+        choices=["fp16", "bf16", "fp32"],
         help=(
-            "Mixed precision mode: 'fp16' (default), 'bf16', 'fp8', or 'fp32'. "
+            "Mixed precision mode: 'fp16' (default), 'bf16', or 'fp32'. "
             "fp16: CUDA (with gradient scaling) or MPS. "
-            "bf16: CUDA (with bf16 support) or MPS. "
-            "fp8: CUDA only, requires accelerate with Transformer Engine/MS-AMP."
+            "bf16: CUDA (with bf16 support) or MPS."
         )
     )
 
