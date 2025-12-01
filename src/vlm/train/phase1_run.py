@@ -20,7 +20,6 @@ torchrun --nproc_per_node=2 src/vlm/train/phase1_run.py --data_path \
 import argparse
 import math
 import os
-import sys
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -292,16 +291,16 @@ def train(args):
     # 5. Initialize Trainer
     # Validate precision argument
     precision = args.precision.lower()
-    if precision not in ["fp16", "bf16", "fp8", "fp32"]:
+    if precision not in ["fp16", "bf16", "fp32"]:
         if rank == 0:
             print(
                 f"Error: Invalid precision '{precision}'. "
-                "Must be 'fp16', 'bf16', 'fp8', or 'fp32'."
+                "Must be 'fp16', 'bf16', or 'fp32'."
             )
         if ddp_enabled:
             cleanup_ddp()
         return
-    
+
     if rank == 0:
         print(f"Using precision: {precision}")
 
@@ -436,12 +435,11 @@ if __name__ == "__main__":
         "--precision",
         type=str,
         default="fp16",
-        choices=["fp16", "bf16", "fp8", "fp32"],
+        choices=["fp16", "bf16", "fp32"],
         help=(
-            "Mixed precision mode: 'fp16' (default), 'bf16', 'fp8', or 'fp32'. "
+            "Mixed precision mode: 'fp16' (default), 'bf16', or 'fp32'. "
             "fp16: CUDA (with gradient scaling) or MPS. "
-            "bf16: CUDA (with bf16 support) or MPS. "
-            "fp8: CUDA only, requires accelerate with Transformer Engine/MS-AMP."
+            "bf16: CUDA (with bf16 support) or MPS."
         )
     )
 

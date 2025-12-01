@@ -273,7 +273,7 @@ def train(args):
                     val_device = torch.device("mps")
                 else:
                     val_device = torch.device("cpu")
-                
+
                 validation_passed = validate_masking_and_prepending(
                     dataset,
                     model,
@@ -281,17 +281,28 @@ def train(args):
                     num_samples=args.validation_samples,
                     device=val_device,
                 )
-                
+
                 if not validation_passed:
-                    print("\n❌ Data validation failed. Please fix issues before training.")
+                    print(
+                        "\n❌ Data validation failed. "
+                        "Please fix issues before training."
+                    )
                     if ddp_enabled:
                         cleanup_ddp()
                     return
                 else:
-                    print("\n✅ Data validation passed. Proceeding with training.")
+                    print(
+                        "\n✅ Data validation passed. "
+                        "Proceeding with training."
+                    )
             except ImportError as e:
-                print(f"⚠️  Warning: Could not import validation function: {e}")
-                print("   Validation skipped. Install required dependencies if needed.")
+                print(
+                    f"⚠️  Warning: Could not import validation function: {e}"
+                )
+                print(
+                    "   Validation skipped. "
+                    "Install required dependencies if needed."
+                )
             except Exception as e:
                 print(f"⚠️  Warning: Validation failed with error: {e}")
                 print("   Proceeding with training anyway.")
@@ -363,16 +374,16 @@ def train(args):
     # 5. Initialize Trainer
     # Validate precision argument
     precision = args.precision.lower()
-    if precision not in ["fp16", "bf16", "fp8", "fp32"]:
+    if precision not in ["fp16", "bf16", "fp32"]:
         if rank == 0:
             print(
                 f"Error: Invalid precision '{precision}'. "
-                "Must be 'fp16', 'bf16', 'fp8', or 'fp32'."
+                "Must be 'fp16', 'bf16', or 'fp32'."
             )
         if ddp_enabled:
             cleanup_ddp()
         return
-    
+
     if rank == 0:
         print(f"Using precision: {precision}")
 
@@ -511,12 +522,11 @@ if __name__ == "__main__":
         "--precision",
         type=str,
         default="fp16",
-        choices=["fp16", "bf16", "fp8", "fp32"],
+        choices=["fp16", "bf16", "fp32"],
         help=(
-            "Mixed precision mode: 'fp16' (default), 'bf16', 'fp8', or 'fp32'. "
+            "Mixed precision mode: 'fp16' (default), 'bf16', or 'fp32'. "
             "fp16: CUDA (with gradient scaling) or MPS. "
-            "bf16: CUDA (with bf16 support) or MPS. "
-            "fp8: CUDA only, requires accelerate with Transformer Engine/MS-AMP."
+            "bf16: CUDA (with bf16 support) or MPS."
         )
     )
 
