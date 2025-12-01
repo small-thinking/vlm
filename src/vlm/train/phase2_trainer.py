@@ -31,7 +31,7 @@ class Phase2Trainer:
         wandb_run_name: Optional[str] = None,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
-        save_checkpoint_interval: int = 500,
+        save_checkpoint_interval: int = 1000,
         precision: str = "fp16",
         gradient_accumulation_steps: int = 1,
     ):
@@ -409,7 +409,7 @@ class Phase2Trainer:
             # Only print logs on rank 0
             # Only log grad_norm when we actually step (after accumulation)
             if self.rank == 0:
-                if not self.use_wandb and step % 100 == 0:
+                if not self.use_wandb and step % 1000 == 0:
                     grad_norm_str = (
                         f"{grad_norm:.4f}" if grad_norm is not None
                         else "accumulating"
