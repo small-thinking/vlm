@@ -260,12 +260,9 @@ def train(args):
             print("=" * 80)
             try:
                 # Import validation function from scripts
-                from pathlib import Path
                 scripts_path = Path(__file__).parent.parent.parent / "scripts"
                 sys.path.insert(0, str(scripts_path))
-                from inspect_phase2_data import (
-                    validate_masking_and_prepending
-                )
+                from inspect_phase2_data import validate_masking_and_prepending
                 # Determine device for validation
                 if torch.cuda.is_available():
                     val_device = torch.device("cuda")
