@@ -174,6 +174,7 @@ def train(args):
     # Get tokenizer and processor from model components
     tokenizer = model.language_model.tokenizer
     image_processor = model.vision_encoder.processor
+    num_visual_tokens = model.vision_encoder.num_visual_tokens
 
     # Build dataset
     try:
@@ -187,6 +188,7 @@ def train(args):
             image_processor=image_processor,
             tokenizer=tokenizer,
             max_length=data_config.max_length,
+            num_visual_tokens=num_visual_tokens,
         )
 
         # Create DistributedSampler if DDP is enabled
@@ -385,8 +387,14 @@ if __name__ == "__main__":
                         help="Batch size")
     parser.add_argument("--num_workers", type=int, default=8,
                         help="Number of dataloader workers")
-    parser.add_argument("--max_length", type=int, default=512,
-                        help="Max sequence length")
+    parser.add_argument(
+        "--max_length", type=int, default=1024,
+        help=(
+            "Max sequence length (should accommodate visual tokens, "
+            "e.g., 1024 for 336px with 577 visual tokens). "
+            "Sequences longer than max_length will be truncated."
+        )
+    )
     parser.add_argument("--learning_rate", type=float, default=3e-4,
                         help="Learning rate")
     parser.add_argument("--max_steps", type=int, default=10,

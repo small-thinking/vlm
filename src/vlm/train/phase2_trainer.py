@@ -463,7 +463,12 @@ class Phase2Trainer:
 
             # Save checkpoint only on rank 0
             if step % self.save_checkpoint_interval == 0 and self.rank == 0:
-                filename = f"checkpoint_phase2_{self.precision}.pt"
+                image_size = (
+                    self.underlying_model.vision_encoder.image_size
+                )
+                filename = (
+                    f"checkpoint_phase2_{self.precision}_{image_size}px.pt"
+                )
                 self.save_checkpoint(filename)
 
             # Early stopping if loss explodes
@@ -504,7 +509,12 @@ class Phase2Trainer:
 
         # Final checkpoint save only on rank 0
         if self.rank == 0:
-            filename = f"checkpoint_phase2_{self.precision}.pt"
+            image_size = (
+                self.underlying_model.vision_encoder.image_size
+            )
+            filename = (
+                f"checkpoint_phase2_{self.precision}_{image_size}px.pt"
+            )
             self.save_checkpoint(filename)
             print("Training completed.")
 
