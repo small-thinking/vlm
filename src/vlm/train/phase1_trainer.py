@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from vlm.models.llava import LLaVAModel
+from vlm.utils.ddp_sync import ddp_synchronized
 
 
 class Phase1Trainer:
@@ -229,6 +230,13 @@ class Phase1Trainer:
 
     def train(self):
         """Run training loop."""
+        # Wrap entire training in DDP synchronization context
+        # This ensures all ranks stay synchronized even on errors/early returns
+        with ddp_synchronized(ddp_enabled=self.ddp_enabled):
+            self._train_impl()
+
+    def _train_impl(self):
+        """Internal training implementation."""
         if self.rank == 0:
             print("Starting training...")
         self.model.train()
@@ -333,6 +341,9 @@ class Phase1Trainer:
                 # Reset accumulation when skipping a batch
                 # to avoid partial accumulation
                 accumulation_step = 0
+                # Synchronize all ranks before continuing
+                if self.ddp_enabled and dist.is_initialized():
+                    dist.barrier()
                 continue
 
             # Scale loss by accumulation steps to get average gradient
@@ -479,6 +490,7 @@ class Phase1Trainer:
                         f"{loss_value}"
                     )
                     print("Stopping training to prevent further issues.")
+                # Break will exit the loop, context manager will handle barrier
                 break
 
         # Handle final optimizer step if we have accumulated gradients

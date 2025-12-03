@@ -1,6 +1,7 @@
 """Model configuration dataclasses."""
 from dataclasses import dataclass
 from typing import Optional
+import torch
 
 
 @dataclass
@@ -63,6 +64,13 @@ class LanguageModelConfig:
 
     Default is True for LLaVA stage 1 training (only train connector).
     Set to False for stage 2 training (train connector + LLM).
+    """
+
+    torch_dtype: Optional[torch.dtype] = None
+    """Desired dtype for model parameters.
+
+    If None, defaults to bf16 on CUDA (if supported) or fp32 otherwise.
+    Should match training precision to avoid dtype mismatches.
     """
 
 

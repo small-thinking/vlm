@@ -32,6 +32,7 @@ from vlm.configs.data_config import Phase1DataConfig
 from vlm.configs.model_config import LLaVAConfig
 from vlm.models.llava import LLaVAModel
 from vlm.train.phase1_trainer import Phase1Trainer
+from vlm.utils.ddp_sync import ddp_synchronized
 
 
 def get_cosine_schedule_with_warmup(
@@ -145,10 +146,55 @@ def train(args):
                 f"local_rank={local_rank}, world_size={world_size}"
             )
 
+    # Determine model dtype based on precision (before model initialization)
+    # Validate precision argument early
+    precision = args.precision.lower()
+    if precision not in ["fp16", "bf16", "fp32"]:
+        if rank == 0:
+            print(
+                f"Error: Invalid precision '{precision}'. "
+                "Must be 'fp16', 'bf16', or 'fp32'."
+            )
+        if ddp_enabled:
+            cleanup_ddp()
+        return
+
+    # Wrap entire training setup and execution in DDP synchronization context
+    # This ensures all ranks stay synchronized even on errors/early returns
+    with ddp_synchronized(ddp_enabled=ddp_enabled):
+        _train_impl(
+            args, rank, local_rank, world_size, device, ddp_enabled, precision
+        )
+
+    # Cleanup DDP after context exits
+    if ddp_enabled:
+        cleanup_ddp()
+
+
+def _train_impl(
+    args, rank, local_rank, world_size, device, ddp_enabled, precision
+):
+    """Internal training implementation wrapped in DDP sync context."""
+
+    # Map precision to torch dtype for model parameters
+    # Model dtype should match training precision to avoid dtype mismatches
+    # Autocast will handle mixed precision conversion during forward/backward
+    if precision == "fp16":
+        model_dtype = torch.float16
+    elif precision == "bf16":
+        model_dtype = torch.bfloat16
+    else:  # fp32
+        model_dtype = torch.float32
+
+    if rank == 0:
+        print(f"Using precision: {precision} (model dtype: {model_dtype})")
+
     # 2. Initialize Model
     if rank == 0:
         print("Initializing LLaVA model...")
     config = LLaVAConfig()
+    # Set language model dtype to match training precision
+    config.language_model.torch_dtype = model_dtype
     model = LLaVAModel(config)
 
     # Wrap model with DDP if enabled
@@ -248,8 +294,7 @@ def train(args):
         if rank == 0:
             print(f"Error creating dataloader: {e}")
             print("Please ensure dataset is downloaded using ./setup.sh")
-        if ddp_enabled:
-            cleanup_ddp()
+        # Context manager will handle synchronization
         return
 
     # 4. Setup Optimizer
@@ -291,20 +336,7 @@ def train(args):
             )
 
     # 5. Initialize Trainer
-    # Validate precision argument
-    precision = args.precision.lower()
-    if precision not in ["fp16", "bf16", "fp32"]:
-        if rank == 0:
-            print(
-                f"Error: Invalid precision '{precision}'. "
-                "Must be 'fp16', 'bf16', or 'fp32'."
-            )
-        if ddp_enabled:
-            cleanup_ddp()
-        return
-
-    if rank == 0:
-        print(f"Using precision: {precision}")
+    # Precision already validated and model dtype set above
 
     # Calculate effective batch size with gradient accumulation
     effective_batch_size = (
@@ -354,12 +386,9 @@ def train(args):
     )
 
     # 6. Start Training
-    try:
-        trainer.train()
-    finally:
-        # Cleanup DDP
-        if ddp_enabled:
-            cleanup_ddp()
+    # Training is wrapped in context manager,
+    # so errors are handled automatically
+    trainer.train()
 
 
 if __name__ == "__main__":
