@@ -444,6 +444,7 @@ def _train_impl(
         scheduler=scheduler,
         precision=precision,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        sampler=sampler,  # Pass sampler for proper epoch synchronization
         hyperparams={
             "learning_rate": args.learning_rate,
             "batch_size": args.batch_size,

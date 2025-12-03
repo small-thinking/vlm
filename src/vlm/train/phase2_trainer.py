@@ -3,7 +3,7 @@
 import os
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import torch
 import torch.distributed as dist
@@ -35,6 +35,7 @@ class Phase2Trainer:
         save_checkpoint_interval: int = 1000,
         precision: str = "fp16",
         gradient_accumulation_steps: int = 1,
+        sampler: Optional[Any] = None,
     ):
         """Initialize Phase 2 Trainer.
 
@@ -59,6 +60,8 @@ class Phase2Trainer:
                 (default: "fp16")
             gradient_accumulation_steps: Number of gradient accumulation steps
                 (default: 1, no accumulation)
+            sampler: DistributedSampler instance (required for DDP to ensure
+                proper epoch synchronization)
         """
         self.model = model
         self.train_dataloader = train_dataloader
@@ -73,6 +76,7 @@ class Phase2Trainer:
         self.save_checkpoint_interval = save_checkpoint_interval
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.precision = precision
+        self.sampler = sampler
 
         # Auto-detect rank and world_size from environment or dist
         # (needed early for logging)
@@ -248,6 +252,7 @@ class Phase2Trainer:
         step = 0
         total_loss = 0
         accumulation_step = 0
+        epoch = 0
 
         # Only show progress bar on rank 0
         if self.rank == 0:
@@ -265,6 +270,24 @@ class Phase2Trainer:
             try:
                 batch = next(data_iter)
             except StopIteration:
+                # Epoch finished - synchronize all ranks before starting
+                # new epoch
+                if self.ddp_enabled and dist.is_initialized():
+                    dist.barrier()
+
+                # Increment epoch and set epoch on sampler for proper
+                # shuffling
+                epoch += 1
+                if (self.sampler is not None and
+                        hasattr(self.sampler, 'set_epoch')):
+                    self.sampler.set_epoch(epoch)
+
+                # Synchronize again after setting epoch to ensure all ranks
+                # start the new epoch together
+                if self.ddp_enabled and dist.is_initialized():
+                    dist.barrier()
+
+                # Create new iterator for next epoch
                 data_iter = iter(self.train_dataloader)
                 batch = next(data_iter)
 
@@ -342,10 +365,18 @@ class Phase2Trainer:
                 # Reset accumulation when skipping a batch
                 # to avoid partial accumulation
                 accumulation_step = 0
-                # Synchronize all ranks before continuing
+                # Synchronize all ranks before continuing to ensure
+                # all ranks skip this batch together
                 if self.ddp_enabled and dist.is_initialized():
                     dist.barrier()
                 continue
+
+            # Periodic synchronization barrier every 100 steps to catch
+            # desynchronization early (helps debug and prevents large
+            # divergence)
+            if (self.ddp_enabled and dist.is_initialized() and
+                    step % 100 == 0):
+                dist.barrier()
 
             # Scale loss by accumulation steps to get average gradient
             loss = loss / self.gradient_accumulation_steps
