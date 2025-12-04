@@ -44,8 +44,9 @@ class LLaVAInstructDataset(Dataset):
             (e.g., CLIPImageProcessor)
         tokenizer: Tokenizer for language model
         max_length: Maximum sequence length (includes visual tokens)
-        num_visual_tokens: Number of visual tokens from vision encoder
-            (default 257 for CLIP ViT-L/14: 256 patches + 1 CLS)
+        num_visual_tokens: Number of visual tokens from vision encoder.
+            If None, will be calculated from image_processor.
+            (default 257 for CLIP ViT-L/14 224px: 256 patches + 1 CLS)
     """
     
     def __init__(
@@ -54,13 +55,47 @@ class LLaVAInstructDataset(Dataset):
         image_processor: Optional[CLIPImageProcessor] = None,
         tokenizer: Optional[Any] = None,
         max_length: int = 768,
-        num_visual_tokens: int = 257,  # CLIP ViT-L/14: 256 patches + 1 CLS
+        num_visual_tokens: Optional[int] = None,
     ):
         data_path_expanded = Path(data_path).expanduser()
         self.image_processor = image_processor
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.num_visual_tokens = num_visual_tokens
+        
+        # Calculate num_visual_tokens from image processor if not provided
+        if num_visual_tokens is None:
+            if image_processor is not None:
+                # CLIP ViT models use patch_size=14
+                # num_patches = (image_size / patch_size)^2
+                # num_visual_tokens = num_patches + 1 (CLS token)
+                image_size = image_processor.size.get('height', 224)
+                patch_size = 14  # Standard for ViT-L/14 models
+                num_patches = (image_size // patch_size) ** 2
+                self.num_visual_tokens = num_patches + 1
+            else:
+                # Fallback to default (224px CLIP ViT-L/14)
+                self.num_visual_tokens = 257
+        else:
+            self.num_visual_tokens = num_visual_tokens
+        
+        # Validate max_length is sufficient for visual tokens
+        if self.max_length < self.num_visual_tokens:
+            raise ValueError(
+                f"max_length ({self.max_length}) is too small for "
+                f"{self.num_visual_tokens} visual tokens. "
+                f"max_length must be at least {self.num_visual_tokens + 100} "
+                f"to leave room for text tokens."
+            )
+        elif self.max_length < self.num_visual_tokens + 200:
+            import warnings
+            warnings.warn(
+                f"max_length ({self.max_length}) leaves only "
+                f"{self.max_length - self.num_visual_tokens} tokens for text "
+                f"after reserving {self.num_visual_tokens} visual tokens. "
+                f"Consider increasing max_length to at least "
+                f"{self.num_visual_tokens + 512} for better text capacity.",
+                UserWarning
+            )
         
         # Load dataset from parquet files in folder
         print(f"Loading dataset from folder: {data_path_expanded}...")

@@ -10,10 +10,10 @@ python src/vlm/train/phase2_run.py \
 
 Distributed training (automatically enabled when using torchrun):
 torchrun --nproc_per_node=2 src/vlm/train/phase2_run.py \
-    --checkpoint ~/models/llava/checkpoint_phase1_bf16.pt \
+    --checkpoint ~/models/llava/checkpoint_phase1_fp16.pt \
     --data_path ~/dataset/llava-instruct-mix/data \
-    --max_steps 10000 --batch_size 16 --use_cosine_schedule \
-    --gradient_accumulation_steps 4 --precision bf16 \
+    --max_steps 100000 --batch_size 16 --use_cosine_schedule \
+    --gradient_accumulation_steps 4 --precision fp16 \
     --output_dir ~/models/llava --learning_rate 2e-5
 
 Note: --data_path should point to a folder containing parquet files.
@@ -37,6 +37,7 @@ from vlm.configs.data_config import Phase2DataConfig
 from vlm.configs.model_config import LLaVAConfig
 from vlm.models.llava import LLaVAModel
 from vlm.train.phase2_trainer import Phase2Trainer
+from vlm.utils.ddp_sync import ddp_synchronized
 
 
 def get_cosine_schedule_with_warmup(
@@ -150,10 +151,55 @@ def train(args):
                 f"local_rank={local_rank}, world_size={world_size}"
             )
 
+    # Determine model dtype based on precision (before model initialization)
+    # Validate precision argument early
+    precision = args.precision.lower()
+    if precision not in ["fp16", "bf16", "fp32"]:
+        if rank == 0:
+            print(
+                f"Error: Invalid precision '{precision}'. "
+                "Must be 'fp16', 'bf16', or 'fp32'."
+            )
+        if ddp_enabled:
+            cleanup_ddp()
+        return
+
+    # Wrap entire training setup and execution in DDP synchronization context
+    # This ensures all ranks stay synchronized even on errors/early returns
+    with ddp_synchronized(ddp_enabled=ddp_enabled):
+        _train_impl(
+            args, rank, local_rank, world_size, device, ddp_enabled, precision
+        )
+
+    # Cleanup DDP after context exits
+    if ddp_enabled:
+        cleanup_ddp()
+
+
+def _train_impl(
+    args, rank, local_rank, world_size, device, ddp_enabled, precision
+):
+    """Internal training implementation wrapped in DDP sync context."""
+
+    # Map precision to torch dtype for model parameters
+    # Model dtype should match training precision to avoid dtype mismatches
+    # Autocast will handle mixed precision conversion during forward/backward
+    if precision == "fp16":
+        model_dtype = torch.float16
+    elif precision == "bf16":
+        model_dtype = torch.bfloat16
+    else:  # fp32
+        model_dtype = torch.float32
+
+    if rank == 0:
+        print(f"Using precision: {precision} (model dtype: {model_dtype})")
+
     # 2. Initialize Model
     if rank == 0:
         print("Initializing LLaVA model...")
     config = LLaVAConfig()
+    # Set language model dtype to match training precision
+    config.language_model.torch_dtype = model_dtype
     model = LLaVAModel(config)
 
     # Load checkpoint if provided (Phase 2 fine-tunes from Phase 1 checkpoint)
@@ -202,6 +248,7 @@ def train(args):
     # Get tokenizer and processor from model components
     tokenizer = model.language_model.tokenizer
     image_processor = model.vision_encoder.processor
+    num_visual_tokens = model.vision_encoder.num_visual_tokens
 
     # Build dataset
     try:
@@ -214,6 +261,7 @@ def train(args):
             image_processor=image_processor,
             tokenizer=tokenizer,
             max_length=data_config.max_length,
+            num_visual_tokens=num_visual_tokens,
         )
 
         # Create DistributedSampler if DDP is enabled
@@ -284,8 +332,7 @@ def train(args):
                         "\n❌ Data validation failed. "
                         "Please fix issues before training."
                     )
-                    if ddp_enabled:
-                        cleanup_ddp()
+                    # Context manager will handle synchronization
                     return
                 else:
                     print(
@@ -326,8 +373,7 @@ def train(args):
         if rank == 0:
             print(f"Error creating dataloader: {e}")
             print("Please ensure dataset is downloaded using ./setup.sh")
-        if ddp_enabled:
-            cleanup_ddp()
+        # Context manager will handle synchronization
         return
 
     # 4. Setup Optimizer
@@ -369,20 +415,7 @@ def train(args):
             )
 
     # 5. Initialize Trainer
-    # Validate precision argument
-    precision = args.precision.lower()
-    if precision not in ["fp16", "bf16", "fp32"]:
-        if rank == 0:
-            print(
-                f"Error: Invalid precision '{precision}'. "
-                "Must be 'fp16', 'bf16', or 'fp32'."
-            )
-        if ddp_enabled:
-            cleanup_ddp()
-        return
-
-    if rank == 0:
-        print(f"Using precision: {precision}")
+    # Precision already validated and model dtype set above
 
     # Calculate effective batch size with gradient accumulation
     effective_batch_size = (
@@ -411,6 +444,7 @@ def train(args):
         scheduler=scheduler,
         precision=precision,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        sampler=sampler,  # Pass sampler for proper epoch synchronization
         hyperparams={
             "learning_rate": args.learning_rate,
             "batch_size": args.batch_size,
@@ -432,12 +466,9 @@ def train(args):
     )
 
     # 6. Start Training
-    try:
-        trainer.train()
-    finally:
-        # Cleanup DDP
-        if ddp_enabled:
-            cleanup_ddp()
+    # Training is wrapped in context manager,
+    # so errors are handled automatically
+    trainer.train()
 
 
 if __name__ == "__main__":
@@ -458,8 +489,14 @@ if __name__ == "__main__":
                         help="Batch size")
     parser.add_argument("--num_workers", type=int, default=8,
                         help="Number of dataloader workers")
-    parser.add_argument("--max_length", type=int, default=768,
-                        help="Max sequence length")
+    parser.add_argument(
+        "--max_length", type=int, default=1024,
+        help=(
+            "Max sequence length (should accommodate visual tokens, "
+            "e.g., 1024 for 336px with 577 visual tokens). "
+            "Sequences longer than max_length will be truncated."
+        )
+    )
     parser.add_argument("--learning_rate", type=float, default=2e-5,
                         help="Learning rate")
     parser.add_argument("--max_steps", type=int, default=10,

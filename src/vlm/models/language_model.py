@@ -49,7 +49,8 @@ class Qwen2_5LM(LanguageModel):
     def __init__(
         self,
         model_name: str = "Qwen/Qwen2.5-1.5B",
-        freeze: bool = False
+        freeze: bool = False,
+        torch_dtype: Optional[torch.dtype] = None
     ):
         """
         Initialize Qwen 2.5 language model.
@@ -57,18 +58,21 @@ class Qwen2_5LM(LanguageModel):
         Args:
             model_name: HuggingFace model name for Qwen 2.5 model
             freeze: Whether to freeze the model weights
+            torch_dtype: Desired dtype for model parameters. If None, defaults
+                to bf16 on CUDA (if supported) or fp32 otherwise.
         """
         super().__init__()
-        # Default to bf16 if CUDA is available
+        # Use provided dtype, or default to bf16 if CUDA is available
         # (Qwen models recommend bf16 for better numerical stability)
-        if torch.cuda.is_available():
-            if torch.cuda.is_bf16_supported():
-                torch_dtype = torch.bfloat16
+        if torch_dtype is None:
+            if torch.cuda.is_available():
+                if torch.cuda.is_bf16_supported():
+                    torch_dtype = torch.bfloat16
+                else:
+                    # Fall back to fp32 if bf16 not supported
+                    torch_dtype = torch.float32
             else:
-                # Fall back to fp32 if bf16 not supported
                 torch_dtype = torch.float32
-        else:
-            torch_dtype = torch.float32
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch_dtype

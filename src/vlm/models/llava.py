@@ -28,7 +28,8 @@ class LLaVAModel(nn.Module):
         )
         self.language_model = Qwen2_5LM(
             model_name=self.config.language_model.model_name,
-            freeze=self.config.language_model.freeze
+            freeze=self.config.language_model.freeze,
+            torch_dtype=self.config.language_model.torch_dtype
         )
         self.connector = MLPConnector(
             vision_dim=self.vision_encoder.hidden_size,

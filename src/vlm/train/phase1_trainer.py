@@ -3,7 +3,7 @@
 import os
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import torch
 import torch.distributed as dist
@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from vlm.models.llava import LLaVAModel
+from vlm.utils.ddp_sync import ddp_synchronized
 
 
 class Phase1Trainer:
@@ -34,6 +35,7 @@ class Phase1Trainer:
         save_checkpoint_interval: int = 500,
         precision: str = "fp16",
         gradient_accumulation_steps: int = 1,
+        sampler: Optional[Any] = None,
     ):
         """Initialize Phase 1 Trainer.
 
@@ -58,6 +60,8 @@ class Phase1Trainer:
                 (default: "fp16")
             gradient_accumulation_steps: Number of gradient accumulation steps
                 (default: 1, no accumulation)
+            sampler: DistributedSampler instance (required for DDP to ensure
+                proper epoch synchronization)
         """
         self.model = model
         self.train_dataloader = train_dataloader
@@ -72,6 +76,7 @@ class Phase1Trainer:
         self.save_checkpoint_interval = save_checkpoint_interval
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.precision = precision
+        self.sampler = sampler
 
         # Auto-detect rank and world_size from environment or dist
         # (needed early for logging)
@@ -229,6 +234,13 @@ class Phase1Trainer:
 
     def train(self):
         """Run training loop."""
+        # Wrap entire training in DDP synchronization context
+        # This ensures all ranks stay synchronized even on errors/early returns
+        with ddp_synchronized(ddp_enabled=self.ddp_enabled):
+            self._train_impl()
+
+    def _train_impl(self):
+        """Internal training implementation."""
         if self.rank == 0:
             print("Starting training...")
         self.model.train()
@@ -239,6 +251,7 @@ class Phase1Trainer:
         step = 0
         total_loss = 0
         accumulation_step = 0
+        epoch = 0
 
         # Only show progress bar on rank 0
         if self.rank == 0:
@@ -256,6 +269,24 @@ class Phase1Trainer:
             try:
                 batch = next(data_iter)
             except StopIteration:
+                # Epoch finished - synchronize all ranks before starting
+                # new epoch
+                if self.ddp_enabled and dist.is_initialized():
+                    dist.barrier()
+
+                # Increment epoch and set epoch on sampler for proper
+                # shuffling
+                epoch += 1
+                if (self.sampler is not None and
+                        hasattr(self.sampler, 'set_epoch')):
+                    self.sampler.set_epoch(epoch)
+
+                # Synchronize again after setting epoch to ensure all ranks
+                # start the new epoch together
+                if self.ddp_enabled and dist.is_initialized():
+                    dist.barrier()
+
+                # Create new iterator for next epoch
                 data_iter = iter(self.train_dataloader)
                 batch = next(data_iter)
 
@@ -333,7 +364,18 @@ class Phase1Trainer:
                 # Reset accumulation when skipping a batch
                 # to avoid partial accumulation
                 accumulation_step = 0
+                # Synchronize all ranks before continuing to ensure
+                # all ranks skip this batch together
+                if self.ddp_enabled and dist.is_initialized():
+                    dist.barrier()
                 continue
+
+            # Periodic synchronization barrier every 100 steps to catch
+            # desynchronization early (helps debug and prevents large
+            # divergence)
+            if (self.ddp_enabled and dist.is_initialized() and
+                    step % 100 == 0):
+                dist.barrier()
 
             # Scale loss by accumulation steps to get average gradient
             loss = loss / self.gradient_accumulation_steps
@@ -462,7 +504,12 @@ class Phase1Trainer:
 
             # Save checkpoint only on rank 0
             if step % self.save_checkpoint_interval == 0 and self.rank == 0:
-                filename = f"checkpoint_phase1_{self.precision}.pt"
+                image_size = (
+                    self.underlying_model.vision_encoder.image_size
+                )
+                filename = (
+                    f"checkpoint_phase1_{self.precision}_{image_size}px.pt"
+                )
                 self.save_checkpoint(filename)
 
             # Early stopping if loss explodes
@@ -474,6 +521,7 @@ class Phase1Trainer:
                         f"{loss_value}"
                     )
                     print("Stopping training to prevent further issues.")
+                # Break will exit the loop, context manager will handle barrier
                 break
 
         # Handle final optimizer step if we have accumulated gradients
@@ -503,7 +551,12 @@ class Phase1Trainer:
 
         # Final checkpoint save only on rank 0
         if self.rank == 0:
-            filename = f"checkpoint_phase1_{self.precision}.pt"
+            image_size = (
+                self.underlying_model.vision_encoder.image_size
+            )
+            filename = (
+                f"checkpoint_phase1_{self.precision}_{image_size}px.pt"
+            )
             self.save_checkpoint(filename)
             print("Training completed.")
 

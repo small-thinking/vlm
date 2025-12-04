@@ -67,3 +67,20 @@ class CLIPVisionEncoder(VisionEncoder):
     def hidden_size(self) -> int:
         """Return CLIP vision model hidden size."""
         return self.model.config.hidden_size
+    
+    @property
+    def image_size(self) -> int:
+        """Return the image size (height/width in pixels)."""
+        return self.model.config.image_size
+    
+    @property
+    def num_visual_tokens(self) -> int:
+        """Return the number of visual tokens (patches + CLS token).
+        
+        Calculated as: (image_size / patch_size)^2 + 1
+        """
+        config = self.model.config
+        image_size = config.image_size
+        patch_size = config.patch_size
+        num_patches = (image_size // patch_size) ** 2
+        return num_patches + 1  # +1 for CLS token
