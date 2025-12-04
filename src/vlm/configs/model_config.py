@@ -39,13 +39,13 @@ class VisionEncoderConfig:
 class ConnectorConfig:
     """Configuration for the connector/projection layer."""
 
-    num_layers: int = 1
+    num_layers: int = 2
     """Number of MLP layers.
 
     1 = linear projection, 2 = MLP with hidden layer.
     """
 
-    hidden_dim: Optional[int] = None
+    hidden_dim: Optional[int] = 1024
     """Hidden dimension for MLP. Only used if num_layers > 1."""
 
     activation: str = "gelu"
