@@ -122,6 +122,41 @@ class LLaVAModel(nn.Module):
         # Concatenate visual and text embeddings in the same embedding space
         # Shape: (batch, num_visual_tokens + num_text_tokens, hidden_size)
         if visual_embeds is not None and text_embeds is not None:
+            # CRITICAL: Match visual embedding statistics to text embeddings
+            # to prevent numerical instability when fed into frozen LLM.
+            # Even with warmup, mismatched distributions can cause NaN.
+            if self.training:
+                # Compute statistics over the embedding dimension
+                text_mean = (
+                    text_embeds.mean(dim=-1, keepdim=True)
+                    .mean(dim=1, keepdim=True)
+                )
+                text_std = (
+                    text_embeds.std(dim=-1, keepdim=True)
+                    .mean(dim=1, keepdim=True)
+                )
+                visual_mean = (
+                    visual_embeds.mean(dim=-1, keepdim=True)
+                    .mean(dim=1, keepdim=True)
+                )
+                visual_std = (
+                    visual_embeds.std(dim=-1, keepdim=True)
+                    .mean(dim=1, keepdim=True)
+                )
+
+                # Normalize visual embeddings to match text embedding
+                # distribution. This is crucial for frozen LLM stability.
+                if text_std > 0 and visual_std > 0:
+                    # Match mean and std
+                    visual_embeds = (
+                        (visual_embeds - visual_mean) / (visual_std + 1e-8)
+                    ) * (text_std + 1e-8) + text_mean
+                elif visual_std > 0:
+                    # Only normalize std if text_std is zero (shouldn't happen)
+                    visual_embeds = (
+                        (visual_embeds - visual_mean) / (visual_std + 1e-8)
+                    )
+
             inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
         elif visual_embeds is not None:
             inputs_embeds = visual_embeds

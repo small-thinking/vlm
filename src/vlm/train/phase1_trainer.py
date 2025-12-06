@@ -400,6 +400,27 @@ class Phase1Trainer:
             # Only update optimizer and scheduler after accumulating all steps
             grad_norm = None
             if accumulation_step == self.gradient_accumulation_steps:
+                # Check for NaN/Inf gradients before clipping
+                has_nan_grad = False
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        if not torch.isfinite(param.grad).all():
+                            has_nan_grad = True
+                            break
+                
+                if has_nan_grad:
+                    msg = (f"Warning: NaN/Inf gradients detected at step {step}. "
+                           f"Skipping optimizer step.")
+                    if self.rank == 0:
+                        print(msg)
+                    # Zero out gradients to prevent accumulation
+                    self.optimizer.zero_grad()
+                    accumulation_step = 0
+                    # Synchronize all ranks before continuing
+                    if self.ddp_enabled and dist.is_initialized():
+                        dist.barrier()
+                    continue
+                
                 if self.scaler is not None:
                     # FP16 on CUDA - unscale before clipping
                     self.scaler.unscale_(self.optimizer)
@@ -408,6 +429,17 @@ class Phase1Trainer:
                         self.model.parameters(),
                         max_norm=self.max_grad_norm
                     )
+                    # Check if grad_norm is NaN/Inf after clipping
+                    if not torch.isfinite(grad_norm):
+                        msg = (f"Warning: NaN/Inf grad_norm after clipping at "
+                               f"step {step}: {grad_norm}. Skipping optimizer step.")
+                        if self.rank == 0:
+                            print(msg)
+                        self.optimizer.zero_grad()
+                        accumulation_step = 0
+                        if self.ddp_enabled and dist.is_initialized():
+                            dist.barrier()
+                        continue
                     # Optimizer step with scaling
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -417,6 +449,17 @@ class Phase1Trainer:
                         self.model.parameters(),
                         max_norm=self.max_grad_norm
                     )
+                    # Check if grad_norm is NaN/Inf after clipping
+                    if not torch.isfinite(grad_norm):
+                        msg = (f"Warning: NaN/Inf grad_norm after clipping at "
+                               f"step {step}: {grad_norm}. Skipping optimizer step.")
+                        if self.rank == 0:
+                            print(msg)
+                        self.optimizer.zero_grad()
+                        accumulation_step = 0
+                        if self.ddp_enabled and dist.is_initialized():
+                            dist.barrier()
+                        continue
                     # Optimizer step
                     self.optimizer.step()
 
