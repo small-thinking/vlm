@@ -68,16 +68,40 @@ class MLPConnector(nn.Module):
         return activations[name]
     
     def _initialize_weights(self):
-        """Initialize connector weights with small values.
+        """Initialize connector weights with adaptive scaling.
         
-        Uses Xavier uniform initialization with a small gain to prevent
-        large initial activations that can cause training instability.
+        Uses Xavier uniform initialization with adaptive gain. The connector
+        must produce outputs in a similar range to the LLM's text embeddings
+        (from frozen embedding layer) since they're concatenated together.
+        
+        For Phase 1 training, only the connector is trainable, so proper
+        initialization is critical to prevent numerical instability when
+        visual embeddings are fed into the frozen LLM.
         """
         for module in self.mlp.modules():
             if isinstance(module, nn.Linear):
-                # Use smaller initialization for stability
-                # Standard Xavier init uses gain=1.0, we use 0.1 for smaller weights
-                nn.init.xavier_uniform_(module.weight, gain=0.1)
+                # Get input and output dimensions
+                input_dim = module.weight.shape[1]
+                output_dim = module.weight.shape[0]
+                
+                # Adaptive gain based on output dimension (LLM embedding size)
+                # Text embeddings from LLM are typically in range [-2, 2] or so
+                # We want connector outputs to be in a similar range
+                # Base gain of 0.1 works for Qwen2.5-1.5B (~1536 dim)
+                # Scale up for larger models to maintain similar output scale
+                if output_dim <= 1536:
+                    # Small model (Qwen2.5-1.5B)
+                    adaptive_gain = 0.1
+                elif output_dim <= 2048:
+                    # Medium model (Qwen2.5-3B, Qwen3-4B)
+                    adaptive_gain = 0.15
+                else:
+                    # Large model (Qwen2.5-7B+)
+                    adaptive_gain = 0.2
+                
+                # Cap gain to prevent too large initializations
+                adaptive_gain = min(adaptive_gain, 0.3)
+                nn.init.xavier_uniform_(module.weight, gain=adaptive_gain)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
     
