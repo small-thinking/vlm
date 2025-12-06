@@ -56,7 +56,7 @@ class ConnectorConfig:
 class LanguageModelConfig:
     """Configuration for language model."""
 
-    model_name: str = "Qwen/Qwen2.5-1.5B"
+    model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     """HuggingFace model name for the language model."""
 
     freeze: bool = True
