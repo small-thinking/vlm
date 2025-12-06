@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from .vision_encoder import CLIPVisionEncoder
 from .connector import MLPConnector
-from .language_model import Qwen2_5LM
+from .language_model import QwenLM
 from ..configs.model_config import LLaVAConfig
 
 
@@ -26,7 +26,7 @@ class LLaVAModel(nn.Module):
             model_name=self.config.vision_encoder.model_name,
             freeze=self.config.vision_encoder.freeze
         )
-        self.language_model = Qwen2_5LM(
+        self.language_model = QwenLM(
             model_name=self.config.language_model.model_name,
             freeze=self.config.language_model.freeze,
             torch_dtype=self.config.language_model.torch_dtype
