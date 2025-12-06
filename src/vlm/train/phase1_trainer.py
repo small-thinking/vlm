@@ -185,6 +185,15 @@ class Phase1Trainer:
                 "Phase1Trainer: Setting training stage to 1 (Pretraining)..."
             )
         self.underlying_model.set_training_stage(1)
+        
+        # Log model components after setting training stage
+        if self.rank == 0:
+            from vlm.utils.model_logging import log_model_components
+            log_model_components(
+                self.underlying_model,
+                rank=self.rank,
+                use_wandb=self.use_wandb
+            )
 
         # Initialize wandb if enabled (only on rank 0)
         self.wandb = None

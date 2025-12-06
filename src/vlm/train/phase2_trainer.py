@@ -186,6 +186,15 @@ class Phase2Trainer:
                 "(Instruction Tuning)..."
             )
         self.underlying_model.set_training_stage(2)
+        
+        # Log model components after setting training stage
+        if self.rank == 0:
+            from vlm.utils.model_logging import log_model_components
+            log_model_components(
+                self.underlying_model,
+                rank=self.rank,
+                use_wandb=self.use_wandb
+            )
 
         # Initialize wandb if enabled (only on rank 0)
         self.wandb = None
