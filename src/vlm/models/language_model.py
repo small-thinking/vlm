@@ -43,20 +43,26 @@ class LanguageModel(ABC, nn.Module):
         pass
 
 
-class Qwen2_5LM(LanguageModel):
-    """Qwen 2.5 language model wrapper."""
+class QwenLM(LanguageModel):
+    """Qwen language model wrapper (supports Qwen2.5, Qwen3, etc.).
+    
+    This wrapper works with any Qwen model from HuggingFace that uses
+    AutoModelForCausalLM, including:
+    - Qwen2.5 models (e.g., Qwen/Qwen2.5-1.5B)
+    - Qwen3 models (e.g., Qwen/Qwen3-4B-Instruct-2507)
+    """
     
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2.5-1.5B",
+        model_name: str = "Qwen/Qwen3-4B-Instruct-2507",
         freeze: bool = False,
         torch_dtype: Optional[torch.dtype] = None
     ):
         """
-        Initialize Qwen 2.5 language model.
+        Initialize Qwen language model.
         
         Args:
-            model_name: HuggingFace model name for Qwen 2.5 model
+            model_name: HuggingFace model name for Qwen model (Qwen2.5, Qwen3, etc.)
             freeze: Whether to freeze the model weights
             torch_dtype: Desired dtype for model parameters. If None, defaults
                 to bf16 on CUDA (if supported) or fp32 otherwise.
@@ -92,7 +98,7 @@ class Qwen2_5LM(LanguageModel):
         labels: Optional[torch.Tensor] = None,
     ):
         """
-        Forward pass through Qwen 2.5 model.
+        Forward pass through Qwen model.
         
         Args:
             input_ids: Input token IDs (batch_size, seq_len)
@@ -112,7 +118,7 @@ class Qwen2_5LM(LanguageModel):
     
     @property
     def hidden_size(self) -> int:
-        """Return Qwen 2.5 model hidden size."""
+        """Return Qwen model hidden size."""
         return self.model.config.hidden_size
     
     def get_input_embeddings(self) -> nn.Module:

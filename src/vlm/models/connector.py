@@ -36,7 +36,9 @@ class MLPConnector(nn.Module):
         else:
             # Multi-layer MLP
             if hidden_dim is None:
-                raise ValueError("hidden_dim must be provided when num_layers > 1")
+                raise ValueError(
+                    "hidden_dim must be provided when num_layers > 1"
+                )
             
             layers = []
             # First layer
@@ -64,23 +66,63 @@ class MLPConnector(nn.Module):
             "silu": nn.SiLU(),
         }
         if name not in activations:
-            raise ValueError(f"Unknown activation: {name}. Choose from {list(activations.keys())}")
+            raise ValueError(
+                f"Unknown activation: {name}. "
+                f"Choose from {list(activations.keys())}"
+            )
         return activations[name]
     
     def _initialize_weights(self):
-        """Initialize connector weights with small values.
+        """Initialize connector weights with adaptive scaling.
         
-        Uses Xavier uniform initialization with a small gain to prevent
-        large initial activations that can cause training instability.
+        Uses Xavier uniform initialization with adaptive gain. The connector
+        must produce outputs in a similar range to the LLM's text embeddings
+        (from frozen embedding layer) since they're concatenated together.
+        
+        For Phase 1 training, only the connector is trainable, so proper
+        initialization is critical to prevent numerical instability when
+        visual embeddings are fed into the frozen LLM.
         """
         for module in self.mlp.modules():
             if isinstance(module, nn.Linear):
-                # Use smaller initialization for stability
-                # Standard Xavier init uses gain=1.0, we use 0.1 for smaller weights
-                nn.init.xavier_uniform_(module.weight, gain=0.1)
+                # Get output dimension (LLM embedding size)
+                output_dim = module.weight.shape[0]
+
+                # Adaptive gain based on output dimension (LLM embedding size)
+                # Text embeddings from LLM are typically in range [-2, 2]
+                # We want connector outputs to be in a similar range
+                # Base gain of 0.1 works for Qwen2.5-1.5B (~1536 dim)
+                # Scale up for larger models to maintain similar output scale
+                if output_dim <= 1536:
+                    # Small model (Qwen2.5-1.5B)
+                    adaptive_gain = 0.1
+                elif output_dim <= 2048:
+                    # Medium model (Qwen2.5-3B, Qwen3-4B)
+                    adaptive_gain = 0.15
+                else:
+                    # Large model (Qwen2.5-7B+)
+                    adaptive_gain = 0.2
+
+                # Cap gain to prevent too large initializations
+                adaptive_gain = min(adaptive_gain, 0.3)
+                nn.init.xavier_uniform_(
+                    module.weight, gain=adaptive_gain
+                )
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
     
     def forward(self, visual_features: torch.Tensor) -> torch.Tensor:
-        """Project visual features to LLM embedding space."""
-        return self.mlp(visual_features)
+        """Project visual features to LLM embedding space.
+        
+        Includes safeguards to prevent extreme values that could cause
+        numerical instability when concatenated with text embeddings.
+        """
+        # Project visual features
+        output = self.mlp(visual_features)
+        
+        # Clip extreme values to prevent numerical instability
+        # Text embeddings are typically in range [-2, 2], so we clip
+        # connector outputs to a similar range to prevent mismatches
+        output = torch.clamp(output, min=-10.0, max=10.0)
+        
+        return output

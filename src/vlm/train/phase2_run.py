@@ -38,6 +38,7 @@ from vlm.configs.model_config import LLaVAConfig
 from vlm.models.llava import LLaVAModel
 from vlm.train.phase2_trainer import Phase2Trainer
 from vlm.utils.ddp_sync import ddp_synchronized
+from vlm.utils.model_logging import log_model_components
 
 
 def get_cosine_schedule_with_warmup(
@@ -283,6 +284,9 @@ def _train_impl(
     else:
         # Move model to device if not using DDP
         model = model.to(device)
+
+    # Log model components (before training stage is set)
+    log_model_components(model, rank=rank, use_wandb=args.use_wandb)
 
     # 3. Setup Data
     if rank == 0 and not args.use_wandb:
