@@ -33,7 +33,7 @@ class Phase1Trainer:
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
         save_checkpoint_interval: int = 500,
-        precision: str = "fp16",
+        precision: str = "bf16",
         gradient_accumulation_steps: int = 1,
         sampler: Optional[Any] = None,
     ):

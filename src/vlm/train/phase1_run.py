@@ -6,14 +6,14 @@ python src/vlm/train/phase1_run.py --data_path \
     ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
     --image_folder ~/dataset/llava-pretrain \
     --max_steps 10 --batch_size 8 --use_cosine_schedule \
-    --use_wandb --output_dir ~/models/llava --precision fp16
+    --use_wandb --output_dir ~/models/llava --precision bf16
 
 Distributed training (automatically enabled when using torchrun):
 torchrun --nproc_per_node=2 src/vlm/train/phase1_run.py --data_path \
     ~/dataset/llava-pretrain/blip_laion_cc_sbu_558k.json \
     --image_folder ~/dataset/llava-pretrain \
-    --max_steps 100000 --batch_size 32 --use_cosine_schedule \
-    --gradient_accumulation_steps 4 --precision fp16 \
+    --max_steps 100000 --batch_size 16 --use_cosine_schedule \
+    --gradient_accumulation_steps 8 --precision bf16 \
     --output_dir ~/models/llava --learning_rate 2e-3
 """
 

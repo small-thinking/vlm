@@ -39,10 +39,8 @@ class LLaVAModel(nn.Module):
             activation=self.config.connector.activation
         )
         
-        # CRITICAL: Match connector dtype to LLM dtype to prevent NaN gradients.
-        # When LLM is in bf16 and connector in fp32, gradient computation through
-        # the frozen LLM can cause numerical instability (NaN grad_norm).
-        # This is especially important for larger LLMs (4B+).
+        # Match connector dtype to LLM dtype to prevent NaN gradients.
+        # bf16 LLM + fp32 connector causes instability in gradient flow.
         llm_dtype = next(self.language_model.parameters()).dtype
         if llm_dtype != torch.float32:
             self.connector.to(dtype=llm_dtype)
@@ -79,7 +77,7 @@ class LLaVAModel(nn.Module):
         else:
             features = self.vision_encoder(images)
         
-        # Cast vision features to connector dtype to prevent mixed-precision issues
+        # Cast vision features to connector dtype for numerical stability
         connector_dtype = next(self.connector.parameters()).dtype
         if features.dtype != connector_dtype:
             features = features.to(dtype=connector_dtype)
@@ -135,46 +133,6 @@ class LLaVAModel(nn.Module):
         # Concatenate visual and text embeddings in the same embedding space
         # Shape: (batch, num_visual_tokens + num_text_tokens, hidden_size)
         if visual_embeds is not None and text_embeds is not None:
-            # CRITICAL: Match visual embedding statistics to text embeddings
-            # to prevent numerical instability when fed into frozen LLM.
-            # Even with warmup, mismatched distributions can cause NaN.
-            if self.training:
-                # Compute statistics over the embedding dimension
-                text_mean = (
-                    text_embeds.mean(dim=-1, keepdim=True)
-                    .mean(dim=1, keepdim=True)
-                )
-                text_std = (
-                    text_embeds.std(dim=-1, keepdim=True)
-                    .mean(dim=1, keepdim=True)
-                )
-                visual_mean = (
-                    visual_embeds.mean(dim=-1, keepdim=True)
-                    .mean(dim=1, keepdim=True)
-                )
-                visual_std = (
-                    visual_embeds.std(dim=-1, keepdim=True)
-                    .mean(dim=1, keepdim=True)
-                )
-
-                # Normalize visual embeddings to match text embedding
-                # distribution. This is crucial for frozen LLM stability.
-                # Use a safe threshold (1e-6) instead of comparing tensor > 0
-                eps = 1e-6
-                text_std_val = text_std.item()
-                visual_std_val = visual_std.item()
-                
-                if text_std_val > eps and visual_std_val > eps:
-                    # Match mean and std
-                    visual_embeds = (
-                        (visual_embeds - visual_mean) / (visual_std + 1e-8)
-                    ) * text_std + text_mean
-                elif visual_std_val > eps:
-                    # Only normalize std if text_std is near zero (rare)
-                    visual_embeds = (
-                        (visual_embeds - visual_mean) / (visual_std + 1e-8)
-                    )
-
             inputs_embeds = torch.cat([visual_embeds, text_embeds], dim=1)
         elif visual_embeds is not None:
             inputs_embeds = visual_embeds
