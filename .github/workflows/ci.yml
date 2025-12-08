@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  verify:
-    name: Run Verification Scripts
+  lint:
+    name: Lint & Type Check
     runs-on: ubuntu-latest
     
     steps:
@@ -32,5 +32,15 @@ jobs:
     - name: Verify PyTorch installation
       run: uv run python scripts/verify_pytorch.py
     
-    - name: Verify LLaVA model
-      run: uv run python scripts/verify_llava.py
+    - name: Verify imports (no model download)
+      run: |
+        uv run python -c "
+        from vlm.models import LLaVAModel
+        from vlm.configs import LLaVAConfig, VisionEncoderConfig, ConnectorConfig, LanguageModelConfig
+        from vlm.data import LLaVAPretrainDataset, LLaVAInstructDataset
+        from vlm.inference import InferenceService
+        print('✓ All imports successful')
+        "
+    
+    - name: Run linter
+      run: uv run ruff check src/
