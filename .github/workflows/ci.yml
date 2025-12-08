@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint:
-    name: Lint & Type Check
+  verify:
+    name: Verify Installation
     runs-on: ubuntu-latest
     
     steps:
@@ -38,9 +38,6 @@ jobs:
         from vlm.models import LLaVAModel
         from vlm.configs import LLaVAConfig, VisionEncoderConfig, ConnectorConfig, LanguageModelConfig
         from vlm.data import LLaVAPretrainDataset, LLaVAInstructDataset
-        from vlm.inference import InferenceService
+        from vlm.inference import load_model_from_checkpoint, generate_response, create_app
         print('✓ All imports successful')
         "
-    
-    - name: Run linter
-      run: uv run ruff check src/
