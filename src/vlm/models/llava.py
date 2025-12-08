@@ -38,6 +38,14 @@ class LLaVAModel(nn.Module):
             hidden_dim=self.config.connector.hidden_dim,
             activation=self.config.connector.activation
         )
+        
+        # CRITICAL: Match connector dtype to LLM dtype to prevent NaN gradients.
+        # When LLM is in bf16 and connector in fp32, gradient computation through
+        # the frozen LLM can cause numerical instability (NaN grad_norm).
+        # This is especially important for larger LLMs (4B+).
+        llm_dtype = next(self.language_model.parameters()).dtype
+        if llm_dtype != torch.float32:
+            self.connector.to(dtype=llm_dtype)
     
     def freeze_module(self, module: nn.Module, freeze: bool):
         """Freeze or unfreeze a module."""
@@ -70,6 +78,11 @@ class LLaVAModel(nn.Module):
                 features = self.vision_encoder(images)
         else:
             features = self.vision_encoder(images)
+        
+        # Cast vision features to connector dtype to prevent mixed-precision issues
+        connector_dtype = next(self.connector.parameters()).dtype
+        if features.dtype != connector_dtype:
+            features = features.to(dtype=connector_dtype)
             
         return self.connector(features)
     
@@ -146,13 +159,18 @@ class LLaVAModel(nn.Module):
 
                 # Normalize visual embeddings to match text embedding
                 # distribution. This is crucial for frozen LLM stability.
-                if text_std > 0 and visual_std > 0:
+                # Use a safe threshold (1e-6) instead of comparing tensor > 0
+                eps = 1e-6
+                text_std_val = text_std.item()
+                visual_std_val = visual_std.item()
+                
+                if text_std_val > eps and visual_std_val > eps:
                     # Match mean and std
                     visual_embeds = (
                         (visual_embeds - visual_mean) / (visual_std + 1e-8)
-                    ) * (text_std + 1e-8) + text_mean
-                elif visual_std > 0:
-                    # Only normalize std if text_std is zero (shouldn't happen)
+                    ) * text_std + text_mean
+                elif visual_std_val > eps:
+                    # Only normalize std if text_std is near zero (rare)
                     visual_embeds = (
                         (visual_embeds - visual_mean) / (visual_std + 1e-8)
                     )
