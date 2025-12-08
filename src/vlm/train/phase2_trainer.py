@@ -33,7 +33,7 @@ class Phase2Trainer:
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         hyperparams: Optional[dict] = None,
         save_checkpoint_interval: int = 1000,
-        precision: str = "fp16",
+        precision: str = "bf16",
         gradient_accumulation_steps: int = 1,
         sampler: Optional[Any] = None,
     ):
@@ -186,6 +186,15 @@ class Phase2Trainer:
                 "(Instruction Tuning)..."
             )
         self.underlying_model.set_training_stage(2)
+        
+        # Log model components after setting training stage
+        if self.rank == 0:
+            from vlm.utils.model_logging import log_model_components
+            log_model_components(
+                self.underlying_model,
+                rank=self.rank,
+                use_wandb=self.use_wandb
+            )
 
         # Initialize wandb if enabled (only on rank 0)
         self.wandb = None

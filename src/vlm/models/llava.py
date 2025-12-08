@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from .vision_encoder import CLIPVisionEncoder
 from .connector import MLPConnector
-from .language_model import Qwen2_5LM
+from .language_model import QwenLM
 from ..configs.model_config import LLaVAConfig
 
 
@@ -26,7 +26,7 @@ class LLaVAModel(nn.Module):
             model_name=self.config.vision_encoder.model_name,
             freeze=self.config.vision_encoder.freeze
         )
-        self.language_model = Qwen2_5LM(
+        self.language_model = QwenLM(
             model_name=self.config.language_model.model_name,
             freeze=self.config.language_model.freeze,
             torch_dtype=self.config.language_model.torch_dtype
@@ -38,6 +38,12 @@ class LLaVAModel(nn.Module):
             hidden_dim=self.config.connector.hidden_dim,
             activation=self.config.connector.activation
         )
+        
+        # Match connector dtype to LLM dtype to prevent NaN gradients.
+        # bf16 LLM + fp32 connector causes instability in gradient flow.
+        llm_dtype = next(self.language_model.parameters()).dtype
+        if llm_dtype != torch.float32:
+            self.connector.to(dtype=llm_dtype)
     
     def freeze_module(self, module: nn.Module, freeze: bool):
         """Freeze or unfreeze a module."""
@@ -70,6 +76,11 @@ class LLaVAModel(nn.Module):
                 features = self.vision_encoder(images)
         else:
             features = self.vision_encoder(images)
+        
+        # Cast vision features to connector dtype for numerical stability
+        connector_dtype = next(self.connector.parameters()).dtype
+        if features.dtype != connector_dtype:
+            features = features.to(dtype=connector_dtype)
             
         return self.connector(features)
     

@@ -13,7 +13,7 @@ torchrun --nproc_per_node=2 src/vlm/train/phase2_run.py \
     --checkpoint ~/models/llava/checkpoint_phase1_fp16.pt \
     --data_path ~/dataset/llava-instruct-mix/data \
     --max_steps 100000 --batch_size 16 --use_cosine_schedule \
-    --gradient_accumulation_steps 4 --precision fp16 \
+    --gradient_accumulation_steps 8 --precision bf16 \
     --output_dir ~/models/llava --learning_rate 2e-5
 
 Note: --data_path should point to a folder containing parquet files.
@@ -38,6 +38,7 @@ from vlm.configs.model_config import LLaVAConfig
 from vlm.models.llava import LLaVAModel
 from vlm.train.phase2_trainer import Phase2Trainer
 from vlm.utils.ddp_sync import ddp_synchronized
+from vlm.utils.model_logging import log_model_components
 
 
 def get_cosine_schedule_with_warmup(
@@ -283,6 +284,9 @@ def _train_impl(
     else:
         # Move model to device if not using DDP
         model = model.to(device)
+
+    # Log model components (before training stage is set)
+    log_model_components(model, rank=rank, use_wandb=args.use_wandb)
 
     # 3. Setup Data
     if rank == 0 and not args.use_wandb:
